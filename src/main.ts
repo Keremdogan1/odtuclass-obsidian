@@ -10,6 +10,11 @@ const DEFAULT_SETTINGS: ODTUClassSettings = {
 	templateFolder: 'ODTUClass/Templates'
 }
 
+interface NormalizedDates {
+	date: string;
+	time: string;
+}
+
 export default class ODTUClassPlugin extends Plugin {
 	settings: ODTUClassSettings;
 
@@ -56,7 +61,6 @@ export default class ODTUClassPlugin extends Plugin {
 
 		let processedCount = 0;
 
-		// Ensure output folder exists (Vault API for normal folder)
 		if (!this.app.vault.getAbstractFileByPath(this.settings.outputFolder)) {
 			try {
 				await this.createFolderRecursive(this.settings.outputFolder);
@@ -74,7 +78,6 @@ export default class ODTUClassPlugin extends Plugin {
 				
 				await this.processAssignment(assignment);
 				
-				// Delete pending file ONLY after successful creation (Adapter API)
 				await this.app.vault.adapter.remove(filePath);
 				processedCount++;
 			} catch (error) {
@@ -110,7 +113,7 @@ export default class ODTUClassPlugin extends Plugin {
 		if (!templateFile || !(templateFile instanceof TFile)) {
 			console.warn(`Template ${templatePath} not found for assignment ${assignment.id}.`);
 			new Notice(`Template not found: ${templateName}.md`);
-			throw new Error("TemplateNotFound"); // throw so it doesn't delete the JSON
+			throw new Error("TemplateNotFound");
 		}
 
 		const templateContent = await this.app.vault.read(templateFile);
@@ -119,13 +122,10 @@ export default class ODTUClassPlugin extends Plugin {
 		const safeTitle = (assignment.title || 'Untitled').replace(/[\\/:*?"<>|]/g, '-');
 		const safeId = assignment.id.replace(/[^a-zA-Z0-9.-]/g, '-');
 		
-		// Stable identity filename: "Title - ID.md"
-		// This prevents creating (1), (2) for the exact same item.
 		const outputPath = `${this.settings.outputFolder}/${safeTitle} - ${safeId}.md`;
 		
 		const existingFile = this.app.vault.getAbstractFileByPath(outputPath);
 		if (existingFile && existingFile instanceof TFile) {
-			// Overwrite the existing note with updated data
 			await this.app.vault.modify(existingFile, renderedContent);
 		} else {
 			await this.app.vault.create(outputPath, renderedContent);
@@ -147,13 +147,60 @@ export default class ODTUClassPlugin extends Plugin {
 		}
 	}
 
-	renderTemplate(template: string, data: any): string {
-		let result = template;
+	formatOdtuclassDate(isoString: string | null | undefined): NormalizedDates {
+		if (!isoString) {
+			return { date: '', time: '' };
+		}
+		try {
+			const dateObj = new Date(isoString);
+			if (isNaN(dateObj.getTime())) {
+				return { date: '', time: '' };
+			}
+			const formatterDate = new Intl.DateTimeFormat('en-CA', {
+				timeZone: 'Europe/Istanbul',
+				year: 'numeric',
+				month: '2-digit',
+				day: '2-digit'
+			});
+			const formatterTime = new Intl.DateTimeFormat('en-GB', {
+				timeZone: 'Europe/Istanbul',
+				hour: '2-digit',
+				minute: '2-digit',
+				hour12: false
+			});
+			return { 
+				date: formatterDate.format(dateObj), 
+				time: formatterTime.format(dateObj) 
+			};
+		} catch (e) {
+			console.warn("Invalid date format", isoString);
+			return { date: '', time: '' };
+		}
+	}
+
+	renderTemplate(template: string, assignment: any): string {
+		const open = this.formatOdtuclassDate(assignment.openAt);
+		const due = this.formatOdtuclassDate(assignment.dueAt);
+		const close = this.formatOdtuclassDate(assignment.closeAt);
+
+		// Extend data with V2 normalized placeholders while keeping all V1 fields
+		const data = {
+			...assignment,
+			openDate: open.date,
+			openTime: open.time,
+			dueDate: due.date,
+			dueTime: due.time,
+			closeDate: close.date,
+			closeTime: close.time
+		};
+
 		const placeholders = [
-			'title', 'courseName', 'courseId', 'moduleId', 'moduleType', 
-			'url', 'openAt', 'dueAt', 'closeAt'
+			'title', 'courseName', 'courseId', 'moduleId', 'moduleType', 'url',
+			'openAt', 'dueAt', 'closeAt',
+			'openDate', 'openTime', 'dueDate', 'dueTime', 'closeDate', 'closeTime'
 		];
 
+		let result = template;
 		for (const p of placeholders) {
 			const value = data[p] !== null && data[p] !== undefined ? data[p] : '';
 			const regex = new RegExp(`\\{\\{${p}\\}\\}`, 'g');

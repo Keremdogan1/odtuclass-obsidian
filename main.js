@@ -135,8 +135,49 @@ var ODTUClassPlugin = class extends import_obsidian.Plugin {
         return "Unknown";
     }
   }
-  renderTemplate(template, data) {
-    let result = template;
+  formatOdtuclassDate(isoString) {
+    if (!isoString) {
+      return { date: "", time: "" };
+    }
+    try {
+      const dateObj = new Date(isoString);
+      if (isNaN(dateObj.getTime())) {
+        return { date: "", time: "" };
+      }
+      const formatterDate = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Europe/Istanbul",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      });
+      const formatterTime = new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Europe/Istanbul",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+      });
+      return {
+        date: formatterDate.format(dateObj),
+        time: formatterTime.format(dateObj)
+      };
+    } catch (e) {
+      console.warn("Invalid date format", isoString);
+      return { date: "", time: "" };
+    }
+  }
+  renderTemplate(template, assignment) {
+    const open = this.formatOdtuclassDate(assignment.openAt);
+    const due = this.formatOdtuclassDate(assignment.dueAt);
+    const close = this.formatOdtuclassDate(assignment.closeAt);
+    const data = {
+      ...assignment,
+      openDate: open.date,
+      openTime: open.time,
+      dueDate: due.date,
+      dueTime: due.time,
+      closeDate: close.date,
+      closeTime: close.time
+    };
     const placeholders = [
       "title",
       "courseName",
@@ -146,8 +187,15 @@ var ODTUClassPlugin = class extends import_obsidian.Plugin {
       "url",
       "openAt",
       "dueAt",
-      "closeAt"
+      "closeAt",
+      "openDate",
+      "openTime",
+      "dueDate",
+      "dueTime",
+      "closeDate",
+      "closeTime"
     ];
+    let result = template;
     for (const p of placeholders) {
       const value = data[p] !== null && data[p] !== void 0 ? data[p] : "";
       const regex = new RegExp(`\\{\\{${p}\\}\\}`, "g");
