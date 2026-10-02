@@ -195,7 +195,7 @@ export default class ODTUClassPlugin extends Plugin {
 		};
 
 		const placeholders = [
-			'title', 'courseName', 'courseId', 'moduleId', 'moduleType', 'url',
+			'id', 'title', 'courseName', 'courseId', 'moduleId', 'moduleType', 'url',
 			'openAt', 'dueAt', 'closeAt',
 			'openDate', 'openTime', 'dueDate', 'dueTime', 'closeDate', 'closeTime'
 		];

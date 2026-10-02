@@ -179,6 +179,7 @@ var ODTUClassPlugin = class extends import_obsidian.Plugin {
       closeTime: close.time
     };
     const placeholders = [
+      "id",
       "title",
       "courseName",
       "courseId",
