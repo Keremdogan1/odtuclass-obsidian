@@ -1,0 +1,10 @@
+{
+  "id": "odtuclass-obsidian",
+  "name": "ODTUClass",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Imports ODTUClass assignments into Obsidian.",
+  "author": "Kerem Dogan",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}
