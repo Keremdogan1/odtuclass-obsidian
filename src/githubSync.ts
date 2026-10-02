@@ -9,10 +9,14 @@ export async function loadProcessedState(adapter: any): Promise<ProcessedState> 
 	if (await adapter.exists(path)) {
 		try {
 			const content = await adapter.read(path);
-			return JSON.parse(content);
+			const parsed = JSON.parse(content);
+			if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+				throw new Error("State is not a valid JSON object");
+			}
+			return parsed;
 		} catch (e) {
-			console.error("[ODTUClass] Error parsing processed.json. Returning empty state.", e);
-			return {};
+			console.error("[ODTUClass] Error parsing processed.json:", e);
+			throw new Error("Malformed processed.json");
 		}
 	}
 	return {};
@@ -69,7 +73,13 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 		return;
 	}
 
-	const state = await loadProcessedState(plugin.app.vault.adapter);
+	let state;
+	try {
+		state = await loadProcessedState(plugin.app.vault.adapter);
+	} catch (e) {
+		new Notice("ODTUClass: Sync aborted! processed.json is malformed. Check console.");
+		return;
+	}
 	let createdCount = 0;
 	let skipCount = 0;
 	let failCount = 0;
