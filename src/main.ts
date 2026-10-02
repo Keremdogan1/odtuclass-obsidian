@@ -1,13 +1,20 @@
 import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder } from 'obsidian';
+import { syncFromGithub } from './githubSync';
 
 interface ODTUClassSettings {
 	outputFolder: string;
 	templateFolder: string;
+	githubOwner: string;
+	githubRepo: string;
+	githubToken: string;
 }
 
 const DEFAULT_SETTINGS: ODTUClassSettings = {
 	outputFolder: 'ODTUClass/Assignments',
-	templateFolder: 'ODTUClass/Templates'
+	templateFolder: 'ODTUClass/Templates',
+	githubOwner: 'Keremdogan1',
+	githubRepo: 'odtuclass-sync',
+	githubToken: ''
 }
 
 interface NormalizedDates {
@@ -20,6 +27,14 @@ export default class ODTUClassPlugin extends Plugin {
 
 	async onload() {
 		await this.loadSettings();
+
+		this.addCommand({
+			id: 'sync-from-github',
+			name: 'Sync from GitHub',
+			callback: () => {
+				syncFromGithub(this);
+			}
+		});
 
 		this.addCommand({
 			id: 'process-pending-assignments',
@@ -245,6 +260,54 @@ class ODTUClassSettingTab extends PluginSettingTab {
 				.onChange(async (value) => {
 					this.plugin.settings.templateFolder = value;
 					await this.plugin.saveSettings();
+				}));
+
+		containerEl.createEl('h3', {text: 'GitHub Sync'});
+
+		new Setting(containerEl)
+			.setName('GitHub Owner')
+			.setDesc('GitHub username or organization (e.g. Keremdogan1)')
+			.addText(text => text
+				.setPlaceholder('Keremdogan1')
+				.setValue(this.plugin.settings.githubOwner)
+				.onChange(async (value) => {
+					this.plugin.settings.githubOwner = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('GitHub Repository')
+			.setDesc('GitHub repository name (e.g. odtuclass-sync)')
+			.addText(text => text
+				.setPlaceholder('odtuclass-sync')
+				.setValue(this.plugin.settings.githubRepo)
+				.onChange(async (value) => {
+					this.plugin.settings.githubRepo = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('GitHub Token (Fine-grained PAT)')
+			.setDesc('Token with Contents: Read-only access to the sync repository')
+			.addText(text => {
+				text.inputEl.type = 'password';
+				text
+					.setPlaceholder('github_pat_...')
+					.setValue(this.plugin.settings.githubToken)
+					.onChange(async (value) => {
+						this.plugin.settings.githubToken = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName('Sync from GitHub')
+			.setDesc('Manually trigger a sync from the configured GitHub repository')
+			.addButton(button => button
+				.setButtonText('Sync ODTUClass')
+				.setCta()
+				.onClick(() => {
+					syncFromGithub(this.plugin);
 				}));
 	}
 }

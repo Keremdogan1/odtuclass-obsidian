@@ -23,14 +23,118 @@ __export(main_exports, {
   default: () => ODTUClassPlugin
 });
 module.exports = __toCommonJS(main_exports);
+var import_obsidian2 = require("obsidian");
+
+// src/githubSync.ts
 var import_obsidian = require("obsidian");
+async function loadProcessedState(adapter) {
+  const path = ".odtuclass/processed.json";
+  if (await adapter.exists(path)) {
+    try {
+      const content = await adapter.read(path);
+      return JSON.parse(content);
+    } catch (e) {
+      console.error("[ODTUClass] Error parsing processed.json. Returning empty state.", e);
+      return {};
+    }
+  }
+  return {};
+}
+async function syncFromGithub(plugin) {
+  new import_obsidian.Notice("ODTUClass: Syncing from GitHub...");
+  const owner = plugin.settings.githubOwner;
+  const repo = plugin.settings.githubRepo;
+  const token = plugin.settings.githubToken;
+  if (!token) {
+    new import_obsidian.Notice("ODTUClass: GitHub token is not set!");
+    return;
+  }
+  const url = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/pending`;
+  let items;
+  try {
+    const res = await (0, import_obsidian.requestUrl)({
+      url,
+      method: "GET",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "Obsidian-ODTUClass-Plugin"
+      }
+    });
+    if (res.status !== 200) {
+      new import_obsidian.Notice(`ODTUClass: GitHub API returned status ${res.status}`);
+      console.error(`[ODTUClass] GitHub API error: ${res.status}`);
+      return;
+    }
+    items = res.json;
+  } catch (e) {
+    new import_obsidian.Notice("ODTUClass: Network error while fetching from GitHub.");
+    console.error("[ODTUClass] GitHub fetch error:", e.message);
+    return;
+  }
+  if (!Array.isArray(items)) {
+    new import_obsidian.Notice("ODTUClass: Invalid response from GitHub API.");
+    return;
+  }
+  const state = await loadProcessedState(plugin.app.vault.adapter);
+  let newCount = 0;
+  let skipCount = 0;
+  let processedAny = false;
+  for (const item of items) {
+    if (item.name.endsWith(".json")) {
+      const idStr = item.name.replace(".json", "");
+      const idMatch = idStr.match(/^([a-z]+)-(\d+)-(\d+)$/);
+      let possibleId = idStr;
+      if (idMatch) {
+        possibleId = `${idMatch[1]}:${idMatch[2]}:${idMatch[3]}`;
+      }
+      if (state[possibleId]) {
+        skipCount++;
+        continue;
+      }
+      try {
+        const fileRes = await (0, import_obsidian.requestUrl)({
+          url: item.download_url,
+          method: "GET",
+          headers: {
+            "Authorization": `Bearer ${token}`,
+            "User-Agent": "Obsidian-ODTUClass-Plugin"
+          }
+        });
+        const data = fileRes.json;
+        const realId = data.id || possibleId;
+        if (state[realId]) {
+          skipCount++;
+          continue;
+        }
+        newCount++;
+        console.log(`[ODTUClass] DRY-RUN: Discovered new task ID: ${realId}`);
+      } catch (e) {
+        console.error(`[ODTUClass] Error parsing JSON for ${item.name}:`, e.message);
+      }
+    }
+  }
+  new import_obsidian.Notice(`ODTUClass Sync: Found ${newCount} new events. Skipped ${skipCount} processed events. (DRY-RUN)`);
+}
+
+// src/main.ts
 var DEFAULT_SETTINGS = {
   outputFolder: "ODTUClass/Assignments",
-  templateFolder: "ODTUClass/Templates"
+  templateFolder: "ODTUClass/Templates",
+  githubOwner: "Keremdogan1",
+  githubRepo: "odtuclass-sync",
+  githubToken: ""
 };
-var ODTUClassPlugin = class extends import_obsidian.Plugin {
+var ODTUClassPlugin = class extends import_obsidian2.Plugin {
   async onload() {
     await this.loadSettings();
+    this.addCommand({
+      id: "sync-from-github",
+      name: "Sync from GitHub",
+      callback: () => {
+        syncFromGithub(this);
+      }
+    });
     this.addCommand({
       id: "process-pending-assignments",
       name: "Process pending assignments",
@@ -52,13 +156,13 @@ var ODTUClassPlugin = class extends import_obsidian.Plugin {
     const pendingDir = ".odtuclass/pending";
     const exists = await this.app.vault.adapter.exists(pendingDir);
     if (!exists) {
-      new import_obsidian.Notice("No pending ODTUClass assignments found (folder does not exist).");
+      new import_obsidian2.Notice("No pending ODTUClass assignments found (folder does not exist).");
       return;
     }
     const listed = await this.app.vault.adapter.list(pendingDir);
     const jsonFiles = listed.files.filter((f) => f.endsWith(".json"));
     if (jsonFiles.length === 0) {
-      new import_obsidian.Notice("No pending ODTUClass assignments found.");
+      new import_obsidian2.Notice("No pending ODTUClass assignments found.");
       return;
     }
     let processedCount = 0;
@@ -66,7 +170,7 @@ var ODTUClassPlugin = class extends import_obsidian.Plugin {
       try {
         await this.createFolderRecursive(this.settings.outputFolder);
       } catch (e) {
-        new import_obsidian.Notice(`Failed to create output folder: ${this.settings.outputFolder}`);
+        new import_obsidian2.Notice(`Failed to create output folder: ${this.settings.outputFolder}`);
         console.error(e);
         return;
       }
@@ -80,11 +184,11 @@ var ODTUClassPlugin = class extends import_obsidian.Plugin {
         processedCount++;
       } catch (error) {
         console.error(`Failed to process assignment file ${filePath}:`, error);
-        new import_obsidian.Notice(`Failed to process assignment: ${filePath}. Check console for details.`);
+        new import_obsidian2.Notice(`Failed to process assignment: ${filePath}. Check console for details.`);
       }
     }
     if (processedCount > 0) {
-      new import_obsidian.Notice(`Successfully processed ${processedCount} assignment(s).`);
+      new import_obsidian2.Notice(`Successfully processed ${processedCount} assignment(s).`);
     }
   }
   async createFolderRecursive(path) {
@@ -104,9 +208,9 @@ var ODTUClassPlugin = class extends import_obsidian.Plugin {
     const templateName = this.getTemplateNameForModuleType(assignment.moduleType);
     const templatePath = `${this.settings.templateFolder}/${templateName}.md`;
     const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
-    if (!templateFile || !(templateFile instanceof import_obsidian.TFile)) {
+    if (!templateFile || !(templateFile instanceof import_obsidian2.TFile)) {
       console.warn(`Template ${templatePath} not found for assignment ${assignment.id}.`);
-      new import_obsidian.Notice(`Template not found: ${templateName}.md`);
+      new import_obsidian2.Notice(`Template not found: ${templateName}.md`);
       throw new Error("TemplateNotFound");
     }
     const templateContent = await this.app.vault.read(templateFile);
@@ -115,7 +219,7 @@ var ODTUClassPlugin = class extends import_obsidian.Plugin {
     const safeId = assignment.id.replace(/[^a-zA-Z0-9.-]/g, "-");
     const outputPath = `${this.settings.outputFolder}/${safeTitle} - ${safeId}.md`;
     const existingFile = this.app.vault.getAbstractFileByPath(outputPath);
-    if (existingFile && existingFile instanceof import_obsidian.TFile) {
+    if (existingFile && existingFile instanceof import_obsidian2.TFile) {
       await this.app.vault.modify(existingFile, renderedContent);
     } else {
       await this.app.vault.create(outputPath, renderedContent);
@@ -205,7 +309,7 @@ var ODTUClassPlugin = class extends import_obsidian.Plugin {
     return result;
   }
 };
-var ODTUClassSettingTab = class extends import_obsidian.PluginSettingTab {
+var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -214,13 +318,32 @@ var ODTUClassSettingTab = class extends import_obsidian.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "ODTUClass Sync Settings" });
-    new import_obsidian.Setting(containerEl).setName("Output folder").setDesc("Folder where new assignments will be created (e.g. ODTUClass/Assignments)").addText((text) => text.setPlaceholder("ODTUClass/Assignments").setValue(this.plugin.settings.outputFolder).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("Output folder").setDesc("Folder where new assignments will be created (e.g. ODTUClass/Assignments)").addText((text) => text.setPlaceholder("ODTUClass/Assignments").setValue(this.plugin.settings.outputFolder).onChange(async (value) => {
       this.plugin.settings.outputFolder = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("Template folder").setDesc("Folder where templates are stored (e.g. ODTUClass/Templates)").addText((text) => text.setPlaceholder("ODTUClass/Templates").setValue(this.plugin.settings.templateFolder).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("Template folder").setDesc("Folder where templates are stored (e.g. ODTUClass/Templates)").addText((text) => text.setPlaceholder("ODTUClass/Templates").setValue(this.plugin.settings.templateFolder).onChange(async (value) => {
       this.plugin.settings.templateFolder = value;
       await this.plugin.saveSettings();
+    }));
+    containerEl.createEl("h3", { text: "GitHub Sync" });
+    new import_obsidian2.Setting(containerEl).setName("GitHub Owner").setDesc("GitHub username or organization (e.g. Keremdogan1)").addText((text) => text.setPlaceholder("Keremdogan1").setValue(this.plugin.settings.githubOwner).onChange(async (value) => {
+      this.plugin.settings.githubOwner = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian2.Setting(containerEl).setName("GitHub Repository").setDesc("GitHub repository name (e.g. odtuclass-sync)").addText((text) => text.setPlaceholder("odtuclass-sync").setValue(this.plugin.settings.githubRepo).onChange(async (value) => {
+      this.plugin.settings.githubRepo = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian2.Setting(containerEl).setName("GitHub Token (Fine-grained PAT)").setDesc("Token with Contents: Read-only access to the sync repository").addText((text) => {
+      text.inputEl.type = "password";
+      text.setPlaceholder("github_pat_...").setValue(this.plugin.settings.githubToken).onChange(async (value) => {
+        this.plugin.settings.githubToken = value;
+        await this.plugin.saveSettings();
+      });
+    });
+    new import_obsidian2.Setting(containerEl).setName("Sync from GitHub").setDesc("Manually trigger a sync from the configured GitHub repository").addButton((button) => button.setButtonText("Sync ODTUClass").setCta().onClick(() => {
+      syncFromGithub(this.plugin);
     }));
   }
 };
