@@ -153,7 +153,7 @@ export default class ODTUClassPlugin extends Plugin {
 		}
 		try {
 			const dateObj = new Date(isoString);
-			if (isNaN(dateObj.getTime())) {
+			if (Number.isNaN(dateObj.getTime())) {
 				return { date: '', time: '' };
 			}
 			const formatterDate = new Intl.DateTimeFormat('en-CA', {
