@@ -112,8 +112,10 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 				const data = fileRes.json;
 				const realId = data.id;
 
-				if (!realId || realId !== possibleId) {
-					console.error(`[ODTUClass] Security/Consistency warning: Filename ID '${possibleId}' does not match JSON real ID '${realId}'. Skipping.`);
+				const sanitizedRealId = realId ? realId.replace(/[^a-zA-Z0-9._-]+/g, '-') : '';
+
+				if (!realId || sanitizedRealId !== idStr) {
+					console.error(`[ODTUClass] Security/Consistency warning: Filename ID '${idStr}' does not match JSON real ID '${realId}'. Skipping.`);
 					failCount++;
 					continue;
 				}
