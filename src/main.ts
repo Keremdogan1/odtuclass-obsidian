@@ -119,7 +119,7 @@ export default class ODTUClassPlugin extends Plugin {
 		}
 	}
 
-	async processAssignment(assignment: any) {
+	async processAssignment(assignment: any, skipIfExists: boolean = false) {
 		const templateName = this.getTemplateNameForModuleType(assignment.moduleType);
 		const templatePath = `${this.settings.templateFolder}/${templateName}.md`;
 		
@@ -141,6 +141,9 @@ export default class ODTUClassPlugin extends Plugin {
 		
 		const existingFile = this.app.vault.getAbstractFileByPath(outputPath);
 		if (existingFile && existingFile instanceof TFile) {
+			if (skipIfExists) {
+				return;
+			}
 			await this.app.vault.modify(existingFile, renderedContent);
 		} else {
 			await this.app.vault.create(outputPath, renderedContent);

@@ -70,9 +70,10 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 	}
 
 	const state = await loadProcessedState(plugin.app.vault.adapter);
-	let newCount = 0;
+	let createdCount = 0;
 	let skipCount = 0;
-	let processedAny = false;
+	let failCount = 0;
+	let stateChanged = false;
 
 	for (const item of items) {
 		if (item.name.endsWith('.json')) {
@@ -89,8 +90,6 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 				continue;
 			}
 
-			// In Phase 1 we just discover, parse, but do not create markdown.
-			// Let's fetch the actual JSON to confirm the ID (since it's cheap for dry-run if there are not many).
 			try {
 				const fileRes = await requestUrl({
 					url: item.download_url,
@@ -101,23 +100,36 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 					}
 				});
 				const data = fileRes.json;
-				const realId = data.id || possibleId;
+				const realId = data.id;
+
+				if (!realId || realId !== possibleId) {
+					console.error(`[ODTUClass] Security/Consistency warning: Filename ID '${possibleId}' does not match JSON real ID '${realId}'. Skipping.`);
+					failCount++;
+					continue;
+				}
 
 				if (state[realId]) {
 					skipCount++;
 					continue;
 				}
 
-				newCount++;
-				console.log(`[ODTUClass] DRY-RUN: Discovered new task ID: ${realId}`);
-				
-				// Simulate successful process for Phase 1 by updating state (or we can just skip updating state to keep it repeatable).
-				// For Phase 1, we DO NOT write to state yet, to allow repeated testing.
+				await plugin.processAssignment(data, true); // true = skipIfExists
+
+				// Successfully processed, add to state
+				state[realId] = { processedAt: new Date().toISOString() };
+				stateChanged = true;
+				createdCount++;
+
 			} catch (e) {
-				console.error(`[ODTUClass] Error parsing JSON for ${item.name}:`, e.message);
+				console.error(`[ODTUClass] Error processing JSON for ${item.name}:`, e.message);
+				failCount++;
 			}
 		}
 	}
 
-	new Notice(`ODTUClass Sync: Found ${newCount} new events. Skipped ${skipCount} processed events. (DRY-RUN)`);
+	if (stateChanged) {
+		await saveProcessedState(plugin.app.vault.adapter, state);
+	}
+
+	new Notice(`ODTUClass Sync: ${createdCount} created, ${skipCount} skipped, ${failCount} failed.`);
 }

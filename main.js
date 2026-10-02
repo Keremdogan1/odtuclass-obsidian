@@ -40,6 +40,14 @@ async function loadProcessedState(adapter) {
   }
   return {};
 }
+async function saveProcessedState(adapter, state) {
+  const path = ".odtuclass/processed.json";
+  const dir = ".odtuclass";
+  if (!await adapter.exists(dir)) {
+    await adapter.mkdir(dir);
+  }
+  await adapter.write(path, JSON.stringify(state, null, 2));
+}
 async function syncFromGithub(plugin) {
   new import_obsidian.Notice("ODTUClass: Syncing from GitHub...");
   const owner = plugin.settings.githubOwner;
@@ -77,9 +85,10 @@ async function syncFromGithub(plugin) {
     return;
   }
   const state = await loadProcessedState(plugin.app.vault.adapter);
-  let newCount = 0;
+  let createdCount = 0;
   let skipCount = 0;
-  let processedAny = false;
+  let failCount = 0;
+  let stateChanged = false;
   for (const item of items) {
     if (item.name.endsWith(".json")) {
       const idStr = item.name.replace(".json", "");
@@ -102,19 +111,30 @@ async function syncFromGithub(plugin) {
           }
         });
         const data = fileRes.json;
-        const realId = data.id || possibleId;
+        const realId = data.id;
+        if (!realId || realId !== possibleId) {
+          console.error(`[ODTUClass] Security/Consistency warning: Filename ID '${possibleId}' does not match JSON real ID '${realId}'. Skipping.`);
+          failCount++;
+          continue;
+        }
         if (state[realId]) {
           skipCount++;
           continue;
         }
-        newCount++;
-        console.log(`[ODTUClass] DRY-RUN: Discovered new task ID: ${realId}`);
+        await plugin.processAssignment(data, true);
+        state[realId] = { processedAt: new Date().toISOString() };
+        stateChanged = true;
+        createdCount++;
       } catch (e) {
-        console.error(`[ODTUClass] Error parsing JSON for ${item.name}:`, e.message);
+        console.error(`[ODTUClass] Error processing JSON for ${item.name}:`, e.message);
+        failCount++;
       }
     }
   }
-  new import_obsidian.Notice(`ODTUClass Sync: Found ${newCount} new events. Skipped ${skipCount} processed events. (DRY-RUN)`);
+  if (stateChanged) {
+    await saveProcessedState(plugin.app.vault.adapter, state);
+  }
+  new import_obsidian.Notice(`ODTUClass Sync: ${createdCount} created, ${skipCount} skipped, ${failCount} failed.`);
 }
 
 // src/main.ts
@@ -204,7 +224,7 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
       }
     }
   }
-  async processAssignment(assignment) {
+  async processAssignment(assignment, skipIfExists = false) {
     const templateName = this.getTemplateNameForModuleType(assignment.moduleType);
     const templatePath = `${this.settings.templateFolder}/${templateName}.md`;
     const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
@@ -220,6 +240,9 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
     const outputPath = `${this.settings.outputFolder}/${safeTitle} - ${safeId}.md`;
     const existingFile = this.app.vault.getAbstractFileByPath(outputPath);
     if (existingFile && existingFile instanceof import_obsidian2.TFile) {
+      if (skipIfExists) {
+        return;
+      }
       await this.app.vault.modify(existingFile, renderedContent);
     } else {
       await this.app.vault.create(outputPath, renderedContent);
