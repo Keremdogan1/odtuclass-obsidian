@@ -293,6 +293,9 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
           );
         }
         await this.app.vault.modify(existingFile, updatedContent);
+        if (assignment.suggestedProblems && Array.isArray(assignment.suggestedProblems) && assignment.suggestedProblems.length > 0) {
+          await this.processSubtasks(assignment, existingFile);
+        }
         return;
       }
       if (skipIfExists) {
@@ -300,8 +303,130 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
       }
       await this.app.vault.modify(existingFile, renderedContent);
     } else {
-      await this.app.vault.create(outputPath, renderedContent);
+      const createdFile = await this.app.vault.create(outputPath, renderedContent);
+      if (assignment.type === "section" && assignment.suggestedProblems && Array.isArray(assignment.suggestedProblems) && assignment.suggestedProblems.length > 0) {
+        await this.processSubtasks(assignment, createdFile);
+      }
     }
+  }
+  async processSubtasks(assignment, parentFile) {
+    var _a;
+    const subtaskTemplatePath = `${this.settings.templateFolder}/Subtask.md`;
+    const subtaskTemplateFile = this.app.vault.getAbstractFileByPath(subtaskTemplatePath);
+    let subtaskTemplateContent = "";
+    if (subtaskTemplateFile && subtaskTemplateFile instanceof import_obsidian2.TFile) {
+      subtaskTemplateContent = await this.app.vault.read(subtaskTemplateFile);
+    } else {
+      subtaskTemplateContent = `---
+pm-task: true
+projectId: "[[Odt\xFCClass Tasks|Odt\xFCClass Tasks]]"
+parentId: "[[{{parentFileName}}|{{parentTitle}}]]"
+id: "{{id}}"
+title: "{{title}}"
+type: "subtask"
+status: "todo"
+priority: "medium"
+due: "{{dueDate}}"
+tags:
+  - odtuclass
+  - coursework
+  - practice
+---
+
+Parent: [[{{parentFileName}}|{{parentTitle}}]]
+
+## Suggested Problems (Ch. {{chapter}})
+
+{{problemsList}}
+
+## My Notes & Workspace
+
+- [ ] 
+`;
+    }
+    const parentBaseName = parentFile.basename;
+    const parentTitle = assignment.title || parentBaseName;
+    const subtaskRefs = [];
+    for (const item of assignment.suggestedProblems) {
+      const sectionNum = item.section;
+      const topicTitle = item.title ? ` ${item.title}` : "";
+      const subtaskTitle = `${sectionNum}${topicTitle} \u2014 Suggested Problems`;
+      const subtaskId = `${assignment.id}:subtask:${sectionNum}`;
+      const safeSubtaskTitle = subtaskTitle.replace(/[\\/:*?"<>|]/g, "-");
+      const subtaskFileName = `${safeSubtaskTitle}.md`;
+      const subtaskPath = `${this.settings.outputFolder}/${subtaskFileName}`;
+      const problemsList = (item.problems || []).map((p) => `- [ ] Problem ${p}`).join("\n");
+      const subtaskData = {
+        id: subtaskId,
+        title: subtaskTitle,
+        parentFileName: parentBaseName,
+        parentTitle,
+        dueDate: assignment.weekEnd || "",
+        chapter: sectionNum,
+        problemsList
+      };
+      let renderedSubtask = subtaskTemplateContent;
+      for (const key of Object.keys(subtaskData)) {
+        const regex = new RegExp(`\\{\\{${key}\\}\\}`, "g");
+        renderedSubtask = renderedSubtask.replace(regex, String((_a = subtaskData[key]) != null ? _a : ""));
+      }
+      const existingSubtask = this.app.vault.getAbstractFileByPath(subtaskPath);
+      if (!existingSubtask) {
+        await this.app.vault.create(subtaskPath, renderedSubtask);
+      }
+      subtaskRefs.push({
+        basename: safeSubtaskTitle,
+        title: subtaskTitle
+      });
+    }
+    if (subtaskRefs.length > 0) {
+      await this.linkSubtasksInParent(parentFile, subtaskRefs);
+    }
+  }
+  async linkSubtasksInParent(parentFile, subtaskRefs) {
+    let content = await this.app.vault.read(parentFile);
+    const subtaskIdsYaml = subtaskRefs.map((r) => `  - "[[${r.basename}|${r.title}]]"`).join("\n");
+    const subtaskIdsRegex = /^subtaskIds:\s*(\[\]|.*)$/m;
+    if (subtaskIdsRegex.test(content)) {
+      content = content.replace(subtaskIdsRegex, `subtaskIds:
+${subtaskIdsYaml}`);
+    } else {
+      content = content.replace(/^---\n([\s\S]*?)\n---/m, (match, p1) => {
+        return `---
+${p1}
+subtaskIds:
+${subtaskIdsYaml}
+---`;
+      });
+    }
+    const subtasksBeginMarker = "<!-- ODTUCLASS:SUBTASKS:BEGIN -->";
+    const subtasksEndMarker = "<!-- ODTUCLASS:SUBTASKS:END -->";
+    const subtasksChecklist = subtaskRefs.map((r) => {
+      const isChecked = content.includes(`- [x] [[${r.basename}`);
+      return `${isChecked ? "- [x]" : "- [ ]"} [[${r.basename}|${r.title}]]`;
+    }).join("\n");
+    const beginIdx = content.indexOf(subtasksBeginMarker);
+    const endIdx = content.indexOf(subtasksEndMarker);
+    if (beginIdx !== -1 && endIdx !== -1 && endIdx > beginIdx) {
+      content = content.slice(0, beginIdx + subtasksBeginMarker.length) + "\n" + subtasksChecklist + "\n" + content.slice(endIdx);
+    } else {
+      const myNotesHeader = "## My Notes & Workspace";
+      const notesIdx = content.indexOf(myNotesHeader);
+      const subtasksBlock = `
+## Subtasks
+
+${subtasksBeginMarker}
+${subtasksChecklist}
+${subtasksEndMarker}
+
+`;
+      if (notesIdx !== -1) {
+        content = content.slice(0, notesIdx) + subtasksBlock + content.slice(notesIdx);
+      } else {
+        content += subtasksBlock;
+      }
+    }
+    await this.app.vault.modify(parentFile, content);
   }
   getTemplateNameForModuleType(moduleType) {
     switch (moduleType) {
