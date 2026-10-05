@@ -32,7 +32,8 @@ async function loadProcessedState(adapter) {
   if (await adapter.exists(path)) {
     try {
       const content = await adapter.read(path);
-      const parsed = JSON.parse(content);
+      const cleanContent = content.replace(/^\uFEFF/, "");
+      const parsed = JSON.parse(cleanContent);
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
         throw new Error("State is not a valid JSON object");
       }
