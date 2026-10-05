@@ -585,7 +585,7 @@ parentId: "${parentLink}"`);
     });
   }
   async processSubtasks(assignment, parentFile, parentCleanTitle) {
-    var _a;
+    var _a, _b;
     const subtaskTemplatePath = `${this.settings.templateFolder}/Subtask.md`;
     const subtaskTemplateFile = this.app.vault.getAbstractFileByPath(subtaskTemplatePath);
     let subtaskTemplateContent = "";
@@ -648,23 +648,34 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
         const regex = new RegExp(`\\{\\{${key}\\}\\}`, "g");
         renderedSubtask = renderedSubtask.replace(regex, String((_a = subtaskData[key]) != null ? _a : ""));
       }
-      let existingSubtask = this.app.vault.getAbstractFileByPath(subtaskPath);
-      if (!existingSubtask || !(existingSubtask instanceof import_obsidian2.TFile)) {
+      let existingSubtask = null;
+      const directSubtask = this.app.vault.getAbstractFileByPath(subtaskPath);
+      if (directSubtask && directSubtask instanceof import_obsidian2.TFile) {
+        existingSubtask = directSubtask;
+      } else {
+        const mdFiles = this.app.vault.getMarkdownFiles();
+        for (const f of mdFiles) {
+          const cache = this.app.metadataCache.getFileCache(f);
+          if (((_b = cache == null ? void 0 : cache.frontmatter) == null ? void 0 : _b.id) === subtaskId) {
+            existingSubtask = f;
+            break;
+          }
+        }
+      }
+      if (!existingSubtask) {
         await this.app.vault.create(subtaskPath, renderedSubtask);
       } else {
-        let subContent = await this.app.vault.read(existingSubtask);
-        const expectedParent = `parentId: "[[${parentBaseName}|${parentTitle}]]"`;
-        let changed = false;
-        if (!subContent.includes(expectedParent)) {
-          subContent = subContent.replace(/^parentId:\s*.*$/m, expectedParent);
-          changed = true;
-        }
-        if (assignment.weekEnd && !subContent.includes(`due: "${assignment.weekEnd}"`)) {
-          subContent = subContent.replace(/^due:\s*.*$/m, `due: "${assignment.weekEnd}"`);
-          changed = true;
-        }
-        if (changed) {
-          await this.app.vault.modify(existingSubtask, subContent);
+        const subContent = await this.app.vault.read(existingSubtask);
+        const expectedParentLink = `[[${parentBaseName}|${parentTitle}]]`;
+        const mergedContent = this.mergeSuggestedProblemsContent(
+          subContent,
+          item.problems || [],
+          sectionNum,
+          expectedParentLink,
+          assignment.weekEnd || ""
+        );
+        if (mergedContent !== subContent) {
+          await this.app.vault.modify(existingSubtask, mergedContent);
         }
       }
       subtaskRefs.push({
@@ -720,6 +731,73 @@ ${subtasksEndMarker}
       }
     }
     await this.app.vault.modify(parentFile, content);
+  }
+  mergeSuggestedProblemsContent(existingContent, newProblems, chapter, parentLink, dueDate) {
+    let content = existingContent;
+    const expectedParent = `parentId: "${parentLink}"`;
+    if (!content.includes(expectedParent)) {
+      if (/^parentId:\s*.*$/m.test(content)) {
+        content = content.replace(/^parentId:\s*.*$/m, expectedParent);
+      } else {
+        content = content.replace(/^type:\s*.*$/m, `type: "subtask"
+${expectedParent}`);
+      }
+    }
+    if (dueDate) {
+      const expectedDue = `due: "${dueDate}"`;
+      if (!content.includes(expectedDue)) {
+        if (/^due:\s*.*$/m.test(content)) {
+          content = content.replace(/^due:\s*.*$/m, expectedDue);
+        }
+      }
+    }
+    content = content.replace(/^Parent:\s*\[\[.*?\]\]$/m, `Parent: ${parentLink}`);
+    const problemsHeaderRegex = /##\s+Suggested\s+Problems[^\n]*/i;
+    const headerMatch = content.match(problemsHeaderRegex);
+    if (!headerMatch || headerMatch.index === void 0) {
+      return content;
+    }
+    const headerStart = headerMatch.index;
+    const headerEnd = headerStart + headerMatch[0].length;
+    const notesHeader = "## My Notes & Workspace";
+    let notesStart = content.indexOf(notesHeader, headerEnd);
+    if (notesStart === -1) {
+      const nextHeading = content.slice(headerEnd).search(/\n##\s+/);
+      notesStart = nextHeading !== -1 ? headerEnd + nextHeading : content.length;
+    }
+    const existingBlock = content.slice(headerEnd, notesStart);
+    const existingMap = /* @__PURE__ */ new Map();
+    const lines = existingBlock.split("\n");
+    for (const line of lines) {
+      const m = line.match(/^-\s*\[([ xX])\]\s*(?:Problem\s+)?(\S+)(.*)$/);
+      if (m) {
+        const isChecked = m[1].toLowerCase() === "x";
+        const probNum = m[2].trim();
+        const extra = m[3] || "";
+        existingMap.set(probNum, { checked: isChecked, extra });
+      }
+    }
+    const newItems = [];
+    const processedKeys = /* @__PURE__ */ new Set();
+    for (const p of newProblems) {
+      const pStr = String(p).trim();
+      processedKeys.add(pStr);
+      if (existingMap.has(pStr)) {
+        const prev = existingMap.get(pStr);
+        const mark = prev.checked ? "- [x]" : "- [ ]";
+        newItems.push(`${mark} Problem ${pStr}${prev.extra}`);
+      } else {
+        newItems.push(`- [ ] Problem ${pStr}`);
+      }
+    }
+    for (const [probNum, info] of existingMap.entries()) {
+      if (!processedKeys.has(probNum) && info.checked) {
+        newItems.push(`- [x] Problem ${probNum}${info.extra} <!-- removed from syllabus -->`);
+      }
+    }
+    const newProblemsBlock = "\n\n" + newItems.join("\n") + "\n\n";
+    content = content.slice(0, headerEnd) + newProblemsBlock + content.slice(notesStart);
+    return content;
   }
   getTemplateNameForModuleType(moduleType) {
     switch (moduleType) {
