@@ -1,7 +1,10 @@
 import { Notice, requestUrl } from 'obsidian';
 
 export interface ProcessedState {
-	[id: string]: { processedAt: string };
+	[id: string]: {
+		processedAt: string;
+		contentHash?: string;
+	};
 }
 
 export async function loadProcessedState(adapter: any): Promise<ProcessedState> {
@@ -95,7 +98,9 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 				possibleId = `${idMatch[1]}:${idMatch[2]}:${idMatch[3]}`;
 			}
 
-			if (state[possibleId]) {
+			const isPossibleSection = possibleId.startsWith('section:');
+
+			if (state[possibleId] && !isPossibleSection) {
 				skipCount++;
 				continue;
 			}
@@ -120,15 +125,34 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 					continue;
 				}
 
-				if (state[realId]) {
+				const isSection = realId.startsWith('section:');
+				const existingEntry = state[realId];
+
+				// Assignments remain create-only: an existing state entry means skip.
+				if (!isSection && existingEntry) {
+					skipCount++;
+					continue;
+				}
+
+				// Sections are mutable: only skip when the incoming content is unchanged.
+				if (
+					isSection &&
+					existingEntry?.contentHash &&
+					existingEntry.contentHash === data.contentHash
+				) {
 					skipCount++;
 					continue;
 				}
 
 				await plugin.processAssignment(data, true); // true = skipIfExists
 
-				// Successfully processed, add to state
-				state[realId] = { processedAt: new Date().toISOString() };
+				// Successfully processed, add/update state.
+				state[realId] = {
+					processedAt: new Date().toISOString(),
+					...(isSection && data.contentHash
+						? { contentHash: data.contentHash }
+						: {})
+				};
 				stateChanged = true;
 				createdCount++;
 

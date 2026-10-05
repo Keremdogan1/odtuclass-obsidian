@@ -10,7 +10,7 @@ interface ODTUClassSettings {
 }
 
 const DEFAULT_SETTINGS: ODTUClassSettings = {
-	outputFolder: 'ODTUClass/Assignments',
+	outputFolder: 'Projects/OdtüClass Tasks/_tasks',
 	templateFolder: 'ODTUClass/Templates',
 	githubOwner: 'Keremdogan1',
 	githubRepo: 'odtuclass-sync',
@@ -120,7 +120,9 @@ export default class ODTUClassPlugin extends Plugin {
 	}
 
 	async processAssignment(assignment: any, skipIfExists: boolean = false) {
-		const templateName = this.getTemplateNameForModuleType(assignment.moduleType);
+		const templateName = assignment.type === 'section'
+			? 'Section'
+			: this.getTemplateNameForModuleType(assignment.moduleType);
 		const templatePath = `${this.settings.templateFolder}/${templateName}.md`;
 		
 		const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
@@ -141,9 +143,62 @@ export default class ODTUClassPlugin extends Plugin {
 		
 		const existingFile = this.app.vault.getAbstractFileByPath(outputPath);
 		if (existingFile && existingFile instanceof TFile) {
+			if (assignment.type === 'section') {
+				const existingContent = await this.app.vault.read(existingFile);
+
+				const beginMarker = '<!-- ODTUCLASS:BEGIN -->';
+				const endMarker = '<!-- ODTUCLASS:END -->';
+
+				const beginIndex = existingContent.indexOf(beginMarker);
+				const endIndex = existingContent.indexOf(endMarker);
+
+				if (beginIndex === -1 || endIndex === -1 || endIndex < beginIndex) {
+					console.warn(
+						`Section file ${outputPath} is missing valid ODTUCLASS markers. Skipping update.`
+					);
+					return;
+				}
+
+				const renderedBeginIndex = renderedContent.indexOf(beginMarker);
+				const renderedEndIndex = renderedContent.indexOf(endMarker);
+
+				if (
+					renderedBeginIndex === -1 ||
+					renderedEndIndex === -1 ||
+					renderedEndIndex < renderedBeginIndex
+				) {
+					throw new Error(
+						`Section template ${templatePath} is missing valid ODTUCLASS markers.`
+					);
+				}
+
+				const managedContent = renderedContent.slice(
+					renderedBeginIndex + beginMarker.length,
+					renderedEndIndex
+				);
+
+				let updatedContent =
+					existingContent.slice(0, beginIndex + beginMarker.length) +
+					managedContent +
+					existingContent.slice(endIndex);
+
+				const hashRegex = /^(odtuclass-hash:\s*).*$/m;
+
+				if (hashRegex.test(updatedContent)) {
+					updatedContent = updatedContent.replace(
+						hashRegex,
+						`$1"${assignment.contentHash || ''}"`
+					);
+				}
+
+				await this.app.vault.modify(existingFile, updatedContent);
+				return;
+			}
+
 			if (skipIfExists) {
 				return;
 			}
+
 			await this.app.vault.modify(existingFile, renderedContent);
 		} else {
 			await this.app.vault.create(outputPath, renderedContent);
@@ -215,7 +270,8 @@ export default class ODTUClassPlugin extends Plugin {
 		const placeholders = [
 			'id', 'title', 'courseName', 'courseId', 'moduleId', 'moduleType', 'url',
 			'openAt', 'dueAt', 'closeAt',
-			'openDate', 'openTime', 'dueDate', 'dueTime', 'closeDate', 'closeTime'
+			'openDate', 'openTime', 'dueDate', 'dueTime', 'closeDate', 'closeTime',
+			'sectionId', 'weekStart', 'weekEnd', 'content', 'contentHash'
 		];
 
 		let result = template;
@@ -245,9 +301,9 @@ class ODTUClassSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Output folder')
-			.setDesc('Folder where new assignments will be created (e.g. ODTUClass/Assignments)')
+			.setDesc('Folder where new assignments will be created (e.g. Projects/OdtüClass Tasks/_tasks)')
 			.addText(text => text
-				.setPlaceholder('ODTUClass/Assignments')
+				.setPlaceholder('Projects/OdtüClass Tasks/_tasks')
 				.setValue(this.plugin.settings.outputFolder)
 				.onChange(async (value) => {
 					this.plugin.settings.outputFolder = value;

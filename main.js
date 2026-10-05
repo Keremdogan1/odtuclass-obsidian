@@ -107,7 +107,8 @@ async function syncFromGithub(plugin) {
       if (idMatch) {
         possibleId = `${idMatch[1]}:${idMatch[2]}:${idMatch[3]}`;
       }
-      if (state[possibleId]) {
+      const isPossibleSection = possibleId.startsWith("section:");
+      if (state[possibleId] && !isPossibleSection) {
         skipCount++;
         continue;
       }
@@ -122,17 +123,27 @@ async function syncFromGithub(plugin) {
         });
         const data = fileRes.json;
         const realId = data.id;
-        if (!realId || realId !== possibleId) {
-          console.error(`[ODTUClass] Security/Consistency warning: Filename ID '${possibleId}' does not match JSON real ID '${realId}'. Skipping.`);
+        const sanitizedRealId = realId ? realId.replace(/[^a-zA-Z0-9._-]+/g, "-") : "";
+        if (!realId || sanitizedRealId !== idStr) {
+          console.error(`[ODTUClass] Security/Consistency warning: Filename ID '${idStr}' does not match JSON real ID '${realId}'. Skipping.`);
           failCount++;
           continue;
         }
-        if (state[realId]) {
+        const isSection = realId.startsWith("section:");
+        const existingEntry = state[realId];
+        if (!isSection && existingEntry) {
+          skipCount++;
+          continue;
+        }
+        if (isSection && (existingEntry == null ? void 0 : existingEntry.contentHash) && existingEntry.contentHash === data.contentHash) {
           skipCount++;
           continue;
         }
         await plugin.processAssignment(data, true);
-        state[realId] = { processedAt: new Date().toISOString() };
+        state[realId] = {
+          processedAt: new Date().toISOString(),
+          ...isSection && data.contentHash ? { contentHash: data.contentHash } : {}
+        };
         stateChanged = true;
         createdCount++;
       } catch (e) {
@@ -149,7 +160,7 @@ async function syncFromGithub(plugin) {
 
 // src/main.ts
 var DEFAULT_SETTINGS = {
-  outputFolder: "ODTUClass/Assignments",
+  outputFolder: "Projects/Odt\xFCClass Tasks/_tasks",
   templateFolder: "ODTUClass/Templates",
   githubOwner: "Keremdogan1",
   githubRepo: "odtuclass-sync",
@@ -235,7 +246,7 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
     }
   }
   async processAssignment(assignment, skipIfExists = false) {
-    const templateName = this.getTemplateNameForModuleType(assignment.moduleType);
+    const templateName = assignment.type === "section" ? "Section" : this.getTemplateNameForModuleType(assignment.moduleType);
     const templatePath = `${this.settings.templateFolder}/${templateName}.md`;
     const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
     if (!templateFile || !(templateFile instanceof import_obsidian2.TFile)) {
@@ -250,6 +261,40 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
     const outputPath = `${this.settings.outputFolder}/${safeTitle} - ${safeId}.md`;
     const existingFile = this.app.vault.getAbstractFileByPath(outputPath);
     if (existingFile && existingFile instanceof import_obsidian2.TFile) {
+      if (assignment.type === "section") {
+        const existingContent = await this.app.vault.read(existingFile);
+        const beginMarker = "<!-- ODTUCLASS:BEGIN -->";
+        const endMarker = "<!-- ODTUCLASS:END -->";
+        const beginIndex = existingContent.indexOf(beginMarker);
+        const endIndex = existingContent.indexOf(endMarker);
+        if (beginIndex === -1 || endIndex === -1 || endIndex < beginIndex) {
+          console.warn(
+            `Section file ${outputPath} is missing valid ODTUCLASS markers. Skipping update.`
+          );
+          return;
+        }
+        const renderedBeginIndex = renderedContent.indexOf(beginMarker);
+        const renderedEndIndex = renderedContent.indexOf(endMarker);
+        if (renderedBeginIndex === -1 || renderedEndIndex === -1 || renderedEndIndex < renderedBeginIndex) {
+          throw new Error(
+            `Section template ${templatePath} is missing valid ODTUCLASS markers.`
+          );
+        }
+        const managedContent = renderedContent.slice(
+          renderedBeginIndex + beginMarker.length,
+          renderedEndIndex
+        );
+        let updatedContent = existingContent.slice(0, beginIndex + beginMarker.length) + managedContent + existingContent.slice(endIndex);
+        const hashRegex = /^(odtuclass-hash:\s*).*$/m;
+        if (hashRegex.test(updatedContent)) {
+          updatedContent = updatedContent.replace(
+            hashRegex,
+            `$1"${assignment.contentHash || ""}"`
+          );
+        }
+        await this.app.vault.modify(existingFile, updatedContent);
+        return;
+      }
       if (skipIfExists) {
         return;
       }
@@ -331,7 +376,12 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
       "dueDate",
       "dueTime",
       "closeDate",
-      "closeTime"
+      "closeTime",
+      "sectionId",
+      "weekStart",
+      "weekEnd",
+      "content",
+      "contentHash"
     ];
     let result = template;
     for (const p of placeholders) {
@@ -351,7 +401,7 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "ODTUClass Sync Settings" });
-    new import_obsidian2.Setting(containerEl).setName("Output folder").setDesc("Folder where new assignments will be created (e.g. ODTUClass/Assignments)").addText((text) => text.setPlaceholder("ODTUClass/Assignments").setValue(this.plugin.settings.outputFolder).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("Output folder").setDesc("Folder where new assignments will be created (e.g. Projects/Odt\xFCClass Tasks/_tasks)").addText((text) => text.setPlaceholder("Projects/Odt\xFCClass Tasks/_tasks").setValue(this.plugin.settings.outputFolder).onChange(async (value) => {
       this.plugin.settings.outputFolder = value;
       await this.plugin.saveSettings();
     }));
