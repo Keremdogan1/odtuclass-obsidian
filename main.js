@@ -246,8 +246,236 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
       }
     }
   }
+  cleanItemTitle(rawTitle, courseName, isSection, item) {
+    let clean = (rawTitle || "Untitled").trim();
+    if (courseName && clean.startsWith(courseName)) {
+      clean = clean.slice(courseName.length).replace(/^[\s—–-]+/, "").trim();
+    }
+    clean = clean.replace(/^\[.*?\]\s*[^—–-]*[—–-]\s*/, "").trim();
+    clean = clean.replace(/^\[.*?\]\s*/, "").trim();
+    if (isSection) {
+      const dateMatch = clean.match(/([a-zA-Z]+)\s+(\d{1,2})\s*[-–—]\s*(?:([a-zA-Z]+)\s+)?(\d{1,2})/);
+      if (dateMatch && (clean === dateMatch[0] || clean.length <= dateMatch[0].length + 5)) {
+        const secNum = (item == null ? void 0 : item.sectionNumber) || ((item == null ? void 0 : item.weekNumber) !== void 0 ? item.weekNumber : null);
+        const topic = this.extractTopicFromSectionContent(item == null ? void 0 : item.content);
+        if (secNum && topic) {
+          return `Week ${secNum}: ${topic}`;
+        } else if (topic) {
+          return topic;
+        } else if (secNum) {
+          return `Week ${secNum}`;
+        }
+      }
+    }
+    return clean || rawTitle;
+  }
+  extractTopicFromSectionContent(content) {
+    if (!content || typeof content !== "string")
+      return null;
+    const chMatch = content.match(/(?:^|\n)\s*Ch\.\s*\d+:\s*([^\n\r]+)/i);
+    if (chMatch) {
+      return chMatch[1].trim();
+    }
+    const topicsMatch = content.match(/(?:^|\n)\s*Topics to be covered:?\s*\n+([\s\S]*?)(?=\n\s*(?:Suggested problems|Reading assignment|[-*]\s*\d+\.\d+:|$))/i);
+    if (topicsMatch) {
+      const lines = topicsMatch[1].split("\n").map((l) => l.replace(/^\s*\d+\.\d+\.?\s*/, "").replace(/\s+and\s+Infinite\s+Limits/i, "").trim()).filter((l) => l.length > 0 && !l.startsWith("-"));
+      if (lines.length > 0) {
+        if (lines.length <= 2) {
+          return lines.join(" & ");
+        }
+        return `${lines[0]} & ${lines[1]}`;
+      }
+    }
+    return null;
+  }
+  async getOrCreateCourseTask(courseId, courseName) {
+    const courseIdStr = String(courseId);
+    const folder = this.app.vault.getAbstractFileByPath(this.settings.outputFolder);
+    if (folder && folder instanceof import_obsidian2.TFolder) {
+      for (const child of folder.children) {
+        if (child instanceof import_obsidian2.TFile && child.extension === "md") {
+          const cache = this.app.metadataCache.getFileCache(child);
+          const fm = cache == null ? void 0 : cache.frontmatter;
+          if (fm) {
+            if (fm.id === `course:${courseIdStr}` || String(fm["odtuclass-course-id"]) === courseIdStr || fm["pm-task"] === true && fm.type === "task" && fm.title === courseName) {
+              return {
+                file: child,
+                basename: child.basename,
+                title: fm.title || courseName
+              };
+            }
+          }
+        }
+      }
+    }
+    let cleanCourseName = courseName;
+    const bracketMatch = courseName.match(/^\[(.*?)\]\s*(.*)$/);
+    if (bracketMatch) {
+      const codePart = bracketMatch[1].replace(/\s+All Sections/i, "").trim();
+      const titlePart = bracketMatch[2].trim();
+      cleanCourseName = `${codePart} - ${titlePart}`;
+    }
+    const safeBase = cleanCourseName.replace(/[\\/:*?"<>|]/g, "-").trim();
+    const coursePath = `${this.settings.outputFolder}/${safeBase}.md`;
+    let courseFile = this.app.vault.getAbstractFileByPath(coursePath);
+    if (!courseFile || !(courseFile instanceof import_obsidian2.TFile)) {
+      const content = `---
+pm-task: true
+projectId: "[[Odt\xFCClass Tasks|Odt\xFCClass Tasks]]"
+id: "course:${courseIdStr}"
+title: "${courseName}"
+type: "task"
+status: "in-progress"
+priority: "medium"
+due: ""
+tags:
+  - odtuclass
+  - course
+subtaskIds: []
+odtuclass-course-id: "${courseIdStr}"
+odtuclass-course: "${courseName}"
+---
+
+# ${courseName}
+
+**Platform:** ODTUClass  
+
+## Subtasks
+
+<!-- ODTUCLASS:SUBTASKS:BEGIN -->
+<!-- ODTUCLASS:SUBTASKS:END -->
+
+## Course Notes & Workspace
+
+- [ ] 
+`;
+      courseFile = await this.app.vault.create(coursePath, content);
+      await this.registerCourseInProject(safeBase, courseName);
+    }
+    return {
+      file: courseFile,
+      basename: courseFile.basename,
+      title: courseName
+    };
+  }
+  async registerCourseInProject(courseBasename, courseTitle) {
+    const projectPath = "Projects/Odt\xFCClass Tasks/Odt\xFCClass Tasks.md";
+    const projectFile = this.app.vault.getAbstractFileByPath(projectPath);
+    if (!projectFile || !(projectFile instanceof import_obsidian2.TFile))
+      return;
+    let content = await this.app.vault.read(projectFile);
+    const courseLink = `[[${courseBasename}|${courseTitle}]]`;
+    if (!content.includes(`[[${courseBasename}`)) {
+      const taskIdsRegex = /^taskIds:\s*(\[[\s\S]*?\])/m;
+      const taskIdsMatch = content.match(taskIdsRegex);
+      if (taskIdsMatch) {
+        try {
+          const existingArray = JSON.parse(taskIdsMatch[1]);
+          if (Array.isArray(existingArray)) {
+            existingArray.push(courseLink);
+            content = content.replace(taskIdsRegex, `taskIds: ${JSON.stringify(existingArray)}`);
+          }
+        } catch (e) {
+          content = content.replace(taskIdsRegex, (match, p1) => {
+            const trimmed = p1.trim().replace(/\]$/, "");
+            return `taskIds: ${trimmed}, "${courseLink}"]`;
+          });
+        }
+      }
+      if (!content.includes(`- [ ] [[${courseBasename}`) && !content.includes(`- [x] [[${courseBasename}`)) {
+        const tasksHeaderRegex = /(## Tasks\s*\n)/;
+        if (tasksHeaderRegex.test(content)) {
+          content = content.replace(tasksHeaderRegex, `$1- [ ] ${courseLink}
+`);
+        }
+      }
+      await this.app.vault.modify(projectFile, content);
+    }
+  }
+  async linkChildToParent(parentFile, childRef) {
+    let content = await this.app.vault.read(parentFile);
+    const childLink = `[[${childRef.basename}|${childRef.title}]]`;
+    const childEntryYaml = `  - "${childLink}"`;
+    let changed = false;
+    if (!content.includes(`[[${childRef.basename}`)) {
+      const subtaskIdsRegex = /^subtaskIds:\s*(\[\]|.*)$/m;
+      if (subtaskIdsRegex.test(content)) {
+        const currentMatch = content.match(subtaskIdsRegex);
+        if (currentMatch && currentMatch[1].trim() === "[]") {
+          content = content.replace(subtaskIdsRegex, `subtaskIds:
+${childEntryYaml}`);
+        } else {
+          content = content.replace(/^subtaskIds:\s*\n?/m, `subtaskIds:
+${childEntryYaml}
+`);
+        }
+      } else {
+        content = content.replace(/^---\n([\s\S]*?)\n---/m, (match, p1) => {
+          return `---
+${p1}
+subtaskIds:
+${childEntryYaml}
+---`;
+        });
+      }
+      changed = true;
+    }
+    const subtasksBeginMarker = "<!-- ODTUCLASS:SUBTASKS:BEGIN -->";
+    const subtasksEndMarker = "<!-- ODTUCLASS:SUBTASKS:END -->";
+    const beginIdx = content.indexOf(subtasksBeginMarker);
+    const endIdx = content.indexOf(subtasksEndMarker);
+    if (beginIdx !== -1 && endIdx !== -1 && endIdx > beginIdx) {
+      const existingBlock = content.slice(beginIdx + subtasksBeginMarker.length, endIdx);
+      if (!existingBlock.includes(`[[${childRef.basename}`)) {
+        const newBlock = existingBlock.trimEnd() + `
+- [ ] ${childLink}
+`;
+        content = content.slice(0, beginIdx + subtasksBeginMarker.length) + "\n" + newBlock.trim() + "\n" + content.slice(endIdx);
+        changed = true;
+      }
+    } else {
+      const subtasksHeader = "## Subtasks";
+      const headerIdx = content.indexOf(subtasksHeader);
+      if (headerIdx !== -1) {
+        const afterHeader = content.slice(headerIdx + subtasksHeader.length);
+        if (!afterHeader.includes(`[[${childRef.basename}`)) {
+          const nextSectionMatch = afterHeader.search(/\n##\s+/);
+          const insertPoint = nextSectionMatch !== -1 ? headerIdx + subtasksHeader.length + nextSectionMatch : content.length;
+          const newSubtaskLine = `
+
+- [ ] ${childLink}`;
+          content = content.slice(0, insertPoint) + newSubtaskLine + content.slice(insertPoint);
+          changed = true;
+        }
+      } else {
+        const notesHeader = "## ";
+        const notesIdx = content.indexOf(notesHeader);
+        const subtaskBlock = `
+## Subtasks
+
+${subtasksBeginMarker}
+- [ ] ${childLink}
+${subtasksEndMarker}
+
+`;
+        if (notesIdx !== -1) {
+          content = content.slice(0, notesIdx) + subtaskBlock + content.slice(notesIdx);
+        } else {
+          content += subtaskBlock;
+        }
+        changed = true;
+      }
+    }
+    if (changed) {
+      await this.app.vault.modify(parentFile, content);
+    }
+  }
   async processAssignment(assignment, skipIfExists = false) {
-    const templateName = assignment.type === "section" ? "Section" : this.getTemplateNameForModuleType(assignment.moduleType);
+    var _a;
+    const courseTask = await this.getOrCreateCourseTask(assignment.courseId, assignment.courseName);
+    const isSection = assignment.type === "section";
+    const cleanTitle = this.cleanItemTitle(assignment.title, assignment.courseName, isSection, assignment);
+    const templateName = isSection ? "Section" : this.getTemplateNameForModuleType(assignment.moduleType);
     const templatePath = `${this.settings.templateFolder}/${templateName}.md`;
     const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
     if (!templateFile || !(templateFile instanceof import_obsidian2.TFile)) {
@@ -256,13 +484,40 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
       throw new Error("TemplateNotFound");
     }
     const templateContent = await this.app.vault.read(templateFile);
-    const renderedContent = this.renderTemplate(templateContent, assignment);
-    const safeTitle = (assignment.title || "Untitled").replace(/[\\/:*?"<>|]/g, "-");
+    const renderedContent = this.renderTemplate(templateContent, assignment, {
+      parentFileName: courseTask.basename,
+      parentTitle: courseTask.title,
+      cleanTitle
+    });
+    const safeTitle = cleanTitle.replace(/[\\/:*?"<>|]/g, "-").trim();
     const safeId = assignment.id.replace(/[^a-zA-Z0-9.-]/g, "-");
     const outputPath = `${this.settings.outputFolder}/${safeTitle} - ${safeId}.md`;
-    const existingFile = this.app.vault.getAbstractFileByPath(outputPath);
-    if (existingFile && existingFile instanceof import_obsidian2.TFile) {
-      if (assignment.type === "section") {
+    let existingFile = null;
+    const directFile = this.app.vault.getAbstractFileByPath(outputPath);
+    if (directFile && directFile instanceof import_obsidian2.TFile) {
+      existingFile = directFile;
+    } else {
+      const folder = this.app.vault.getAbstractFileByPath(this.settings.outputFolder);
+      if (folder && folder instanceof import_obsidian2.TFolder) {
+        for (const child of folder.children) {
+          if (child instanceof import_obsidian2.TFile && child.extension === "md") {
+            if (child.basename.endsWith(`- ${safeId}`)) {
+              existingFile = child;
+              break;
+            }
+            const cache = this.app.metadataCache.getFileCache(child);
+            if (((_a = cache == null ? void 0 : cache.frontmatter) == null ? void 0 : _a.id) === assignment.id) {
+              existingFile = child;
+              break;
+            }
+          }
+        }
+      }
+    }
+    let targetFile;
+    if (existingFile) {
+      targetFile = existingFile;
+      if (isSection) {
         const existingContent = await this.app.vault.read(existingFile);
         const beginMarker = "<!-- ODTUCLASS:BEGIN -->";
         const endMarker = "<!-- ODTUCLASS:END -->";
@@ -270,7 +525,7 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
         const endIndex = existingContent.indexOf(endMarker);
         if (beginIndex === -1 || endIndex === -1 || endIndex < beginIndex) {
           console.warn(
-            `Section file ${outputPath} is missing valid ODTUCLASS markers. Skipping update.`
+            `Section file ${existingFile.path} is missing valid ODTUCLASS markers. Skipping update.`
           );
           return;
         }
@@ -293,24 +548,43 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
             `$1"${assignment.contentHash || ""}"`
           );
         }
+        const parentLink = `[[${courseTask.basename}|${courseTask.title}]]`;
+        if (!updatedContent.match(/^parentId:\s*.*$/m)) {
+          updatedContent = updatedContent.replace(/^type:\s*.*$/m, `type: "subtask"
+parentId: "${parentLink}"`);
+        }
         await this.app.vault.modify(existingFile, updatedContent);
         if (assignment.suggestedProblems && Array.isArray(assignment.suggestedProblems) && assignment.suggestedProblems.length > 0) {
-          await this.processSubtasks(assignment, existingFile);
+          await this.processSubtasks(assignment, existingFile, cleanTitle);
         }
-        return;
+      } else {
+        if (!skipIfExists) {
+          let updatedContent = renderedContent;
+          const existingContent = await this.app.vault.read(existingFile);
+          const notesHeader = "## Description";
+          if (existingContent.includes(notesHeader)) {
+            const descIdx = existingContent.indexOf(notesHeader);
+            const userDesc = existingContent.slice(descIdx);
+            const newDescIdx = updatedContent.indexOf(notesHeader);
+            if (newDescIdx !== -1) {
+              updatedContent = updatedContent.slice(0, newDescIdx) + userDesc;
+            }
+          }
+          await this.app.vault.modify(existingFile, updatedContent);
+        }
       }
-      if (skipIfExists) {
-        return;
-      }
-      await this.app.vault.modify(existingFile, renderedContent);
     } else {
-      const createdFile = await this.app.vault.create(outputPath, renderedContent);
-      if (assignment.type === "section" && assignment.suggestedProblems && Array.isArray(assignment.suggestedProblems) && assignment.suggestedProblems.length > 0) {
-        await this.processSubtasks(assignment, createdFile);
+      targetFile = await this.app.vault.create(outputPath, renderedContent);
+      if (isSection && assignment.suggestedProblems && Array.isArray(assignment.suggestedProblems) && assignment.suggestedProblems.length > 0) {
+        await this.processSubtasks(assignment, targetFile, cleanTitle);
       }
     }
+    await this.linkChildToParent(courseTask.file, {
+      basename: targetFile.basename,
+      title: cleanTitle
+    });
   }
-  async processSubtasks(assignment, parentFile) {
+  async processSubtasks(assignment, parentFile, parentCleanTitle) {
     var _a;
     const subtaskTemplatePath = `${this.settings.templateFolder}/Subtask.md`;
     const subtaskTemplateFile = this.app.vault.getAbstractFileByPath(subtaskTemplatePath);
@@ -346,14 +620,14 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
 `;
     }
     const parentBaseName = parentFile.basename;
-    const parentTitle = assignment.title || parentBaseName;
+    const parentTitle = parentCleanTitle || parentBaseName;
     const subtaskRefs = [];
     for (const item of assignment.suggestedProblems) {
       const sectionNum = item.section;
       const topicTitle = item.title ? ` ${item.title}` : "";
       const subtaskTitle = `${sectionNum}${topicTitle} \u2014 Suggested Problems`;
       const subtaskId = `${assignment.id}:subtask:${sectionNum}`;
-      const safeSubtaskTitle = subtaskTitle.replace(/[\\/:*?"<>|]/g, "-");
+      const safeSubtaskTitle = subtaskTitle.replace(/[\\/:*?"<>|]/g, "-").trim();
       const subtaskFileName = `${safeSubtaskTitle}.md`;
       const subtaskPath = `${this.settings.outputFolder}/${subtaskFileName}`;
       const problemsList = (item.problems || []).map((p) => `- [ ] Problem ${p}`).join("\n");
@@ -371,9 +645,16 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
         const regex = new RegExp(`\\{\\{${key}\\}\\}`, "g");
         renderedSubtask = renderedSubtask.replace(regex, String((_a = subtaskData[key]) != null ? _a : ""));
       }
-      const existingSubtask = this.app.vault.getAbstractFileByPath(subtaskPath);
-      if (!existingSubtask) {
+      let existingSubtask = this.app.vault.getAbstractFileByPath(subtaskPath);
+      if (!existingSubtask || !(existingSubtask instanceof import_obsidian2.TFile)) {
         await this.app.vault.create(subtaskPath, renderedSubtask);
+      } else {
+        let subContent = await this.app.vault.read(existingSubtask);
+        const expectedParent = `parentId: "[[${parentBaseName}|${parentTitle}]]"`;
+        if (!subContent.includes(expectedParent)) {
+          subContent = subContent.replace(/^parentId:\s*.*$/m, expectedParent);
+          await this.app.vault.modify(existingSubtask, subContent);
+        }
       }
       subtaskRefs.push({
         basename: safeSubtaskTitle,
@@ -473,22 +754,33 @@ ${subtasksEndMarker}
       return { date: "", time: "" };
     }
   }
-  renderTemplate(template, assignment) {
+  renderTemplate(template, assignment, extra) {
     const open = this.formatOdtuclassDate(assignment.openAt);
     const due = this.formatOdtuclassDate(assignment.dueAt);
     const close = this.formatOdtuclassDate(assignment.closeAt);
     const data = {
       ...assignment,
+      parentFileName: (extra == null ? void 0 : extra.parentFileName) || "",
+      parentTitle: (extra == null ? void 0 : extra.parentTitle) || "",
+      cleanTitle: (extra == null ? void 0 : extra.cleanTitle) || assignment.title || "",
+      title: (extra == null ? void 0 : extra.cleanTitle) || assignment.title || "",
+      fullTitle: assignment.title || "",
       openDate: open.date,
       openTime: open.time,
-      dueDate: due.date,
+      dueDate: assignment.type === "section" ? assignment.weekEnd || "" : due.date,
       dueTime: due.time,
       closeDate: close.date,
-      closeTime: close.time
+      closeTime: close.time,
+      weekStart: assignment.weekStart || "",
+      weekEnd: assignment.weekEnd || ""
     };
     const placeholders = [
       "id",
       "title",
+      "cleanTitle",
+      "fullTitle",
+      "parentFileName",
+      "parentTitle",
       "courseName",
       "courseId",
       "moduleId",
