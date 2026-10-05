@@ -621,6 +621,8 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
     }
     const parentBaseName = parentFile.basename;
     const parentTitle = parentCleanTitle || parentBaseName;
+    const weekPrefixMatch = parentTitle.match(/^(Week\s+\d+)/i) || parentBaseName.match(/^(Week\s+\d+)/i);
+    const weekPrefix = weekPrefixMatch ? `${weekPrefixMatch[1]} - ` : "";
     const subtaskRefs = [];
     for (const item of assignment.suggestedProblems) {
       const sectionNum = item.section;
@@ -628,7 +630,8 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
       const subtaskTitle = `${sectionNum}${topicTitle} \u2014 Suggested Problems`;
       const subtaskId = `${assignment.id}:subtask:${sectionNum}`;
       const safeSubtaskTitle = subtaskTitle.replace(/[\\/:*?"<>|]/g, "-").trim();
-      const subtaskFileName = `${safeSubtaskTitle}.md`;
+      const fullSubtaskBasename = `${weekPrefix}${safeSubtaskTitle}`;
+      const subtaskFileName = `${fullSubtaskBasename}.md`;
       const subtaskPath = `${this.settings.outputFolder}/${subtaskFileName}`;
       const problemsList = (item.problems || []).map((p) => `- [ ] Problem ${p}`).join("\n");
       const subtaskData = {
@@ -651,13 +654,21 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
       } else {
         let subContent = await this.app.vault.read(existingSubtask);
         const expectedParent = `parentId: "[[${parentBaseName}|${parentTitle}]]"`;
+        let changed = false;
         if (!subContent.includes(expectedParent)) {
           subContent = subContent.replace(/^parentId:\s*.*$/m, expectedParent);
+          changed = true;
+        }
+        if (assignment.weekEnd && !subContent.includes(`due: "${assignment.weekEnd}"`)) {
+          subContent = subContent.replace(/^due:\s*.*$/m, `due: "${assignment.weekEnd}"`);
+          changed = true;
+        }
+        if (changed) {
           await this.app.vault.modify(existingSubtask, subContent);
         }
       }
       subtaskRefs.push({
-        basename: safeSubtaskTitle,
+        basename: fullSubtaskBasename,
         title: subtaskTitle
       });
     }
