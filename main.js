@@ -266,6 +266,11 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
           return `Week ${secNum}`;
         }
       }
+    } else {
+      const recMatch = clean.match(/^(?:Math\s*\d+|[A-Z]{3,4}\s*\d{3})?[_\s-]*recitation[_\s-]*(?:\d{4}-\d[_\s-]*)?week\s*0?(\d+)/i) || clean.match(/^(?:Math\s*\d+|[A-Z]{3,4}\s*\d{3})?[_\s-]*week\s*0?(\d+)[_\s-]*recitation/i);
+      if (recMatch) {
+        return `Week ${recMatch[1]}: Recitation`;
+      }
     }
     return clean || rawTitle;
   }
@@ -803,6 +808,8 @@ ${expectedParent}`);
     switch (moduleType) {
       case "assign":
       case "turnitintooltwo":
+      case "pdf_assignment":
+      case "recitation":
         return "Assignment";
       case "quiz":
         return "Quiz";
@@ -810,7 +817,7 @@ ${expectedParent}`);
       case "h5pactivity":
         return "Interactive";
       default:
-        return "Unknown";
+        return "Assignment";
     }
   }
   formatOdtuclassDate(isoString) {
