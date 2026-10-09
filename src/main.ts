@@ -133,6 +133,10 @@ export default class ODTUClassPlugin extends Plugin {
 		// 3. Strip standalone bracket prefix like "[MATH 119 All Sections] "
 		clean = clean.replace(/^\[.*?\]\s*/, '').trim();
 
+		// 4. Strip trailing activity type suffixes like "  Interactive Content", "  Quiz"
+		clean = clean.replace(/\s+(Interactive Content|Interactive Video|Quiz)$/i, '').trim();
+		clean = clean.replace(/\s+/g, ' ').trim();
+
 		if (isSection) {
 			// Check if clean title is a date range like "September 28 - October 4"
 			const dateMatch = clean.match(/([a-zA-Z]+)\s+(\d{1,2})\s*[-–—]\s*(?:([a-zA-Z]+)\s+)?(\d{1,2})/);
@@ -368,7 +372,7 @@ odtuclass-course: "${courseName}"
 		}
 	}
 
-	async findWeeklySectionTask(courseId: string | number, cleanTitle: string, assignment: any): Promise<{ file: TFile; basename: string; title: string } | null> {
+	async findParentSectionTask(courseId: string | number, cleanTitle: string, assignment: any): Promise<{ file: TFile; basename: string; title: string } | null> {
 		const courseIdStr = String(courseId);
 		const folder = this.app.vault.getAbstractFileByPath(this.settings.outputFolder);
 		if (!folder || !(folder instanceof TFolder)) return null;
@@ -382,6 +386,9 @@ odtuclass-course: "${courseName}"
 			weekNum = parseInt(weekMatch[1], 10);
 		} else if (assignment.weekNumber) {
 			weekNum = parseInt(assignment.weekNumber, 10);
+		} else if (assignment.sectionNumber !== undefined && assignment.sectionNumber !== null) {
+			const parsedSec = parseInt(assignment.sectionNumber, 10);
+			if (!isNaN(parsedSec)) weekNum = parsedSec;
 		} else if (/preliminaries|ch\.?\s*0\b/i.test(fullText)) {
 			weekNum = 1;
 		}
@@ -396,6 +403,11 @@ odtuclass-course: "${courseName}"
 			}
 		}
 
+		const targetSectionId = assignment.sectionId !== undefined && assignment.sectionId !== null ? String(assignment.sectionId) : '';
+		const targetSectionName = (assignment.sectionName || '').trim().toLowerCase();
+
+		const candidateSections: { file: TFile; fm: any; basename: string; title: string }[] = [];
+
 		for (const child of folder.children) {
 			if (child instanceof TFile && child.extension === 'md') {
 				const cache = this.app.metadataCache.getFileCache(child);
@@ -403,38 +415,81 @@ odtuclass-course: "${courseName}"
 				if (!fm) continue;
 
 				const isSameCourse = String(fm['odtuclass-course-id']) === courseIdStr ||
-					(typeof fm.id === 'string' && fm.id.startsWith(`section:${courseIdStr}:`));
+					(typeof fm.id === 'string' && (fm.id.startsWith(`section:${courseIdStr}:`) || fm.id.startsWith(`course:${courseIdStr}`)));
 				if (!isSameCourse) continue;
 
-				const fmTitle = (fm.title || child.basename).toLowerCase();
-				const fmWeekMatch = fmTitle.match(/\bweek\s*0?(\d+)\b/i) || child.basename.toLowerCase().match(/\bweek-0?(\d+)\b/i);
-				const sectionWeekNum = fmWeekMatch ? parseInt(fmWeekMatch[1], 10) : null;
+				// Skip the main course note itself
+				if (fm.id === `course:${courseIdStr}`) continue;
 
-				// Match by week number
-				if (weekNum !== null && sectionWeekNum === weekNum) {
-					return {
+				const isSectionNote = (typeof fm.id === 'string' && fm.id.startsWith(`section:`)) ||
+					fm['odtuclass-section-id'] !== undefined ||
+					/\bweek\s*0?\d+\b/i.test(fm.title || child.basename) ||
+					/\bweek-\d+\b/i.test(child.basename);
+
+				if (isSectionNote) {
+					candidateSections.push({
 						file: child,
+						fm,
 						basename: child.basename,
 						title: fm.title || child.basename
-					};
+					});
 				}
+			}
+		}
 
-				// Match by due date within section weekStart / weekEnd
-				if (dueIso && fm.weekStart && fm.weekEnd) {
-					const startStr = String(fm.weekStart).slice(0, 10);
-					const endStr = String(fm.weekEnd).slice(0, 10);
+		// Priority 1: Match by exact sectionId
+		if (targetSectionId) {
+			for (const cand of candidateSections) {
+				const fmSectionId = cand.fm['odtuclass-section-id'] ? String(cand.fm['odtuclass-section-id']) : '';
+				const fmId = typeof cand.fm.id === 'string' ? cand.fm.id : '';
+				if (fmSectionId === targetSectionId || fmId === `section:${courseIdStr}:${targetSectionId}` || fmId.endsWith(`:${targetSectionId}`)) {
+					return { file: cand.file, basename: cand.basename, title: cand.title };
+				}
+			}
+		}
+
+		// Priority 2: Match by sectionName
+		if (targetSectionName) {
+			for (const cand of candidateSections) {
+				const candTitle = (cand.title || '').toLowerCase();
+				const candBase = cand.basename.toLowerCase();
+				if (candTitle === targetSectionName || candBase === targetSectionName ||
+					candTitle.includes(targetSectionName) || targetSectionName.includes(candTitle)) {
+					return { file: cand.file, basename: cand.basename, title: cand.title };
+				}
+			}
+		}
+
+		// Priority 3: Match by week number
+		if (weekNum !== null) {
+			for (const cand of candidateSections) {
+				const fmTitle = (cand.title || cand.basename).toLowerCase();
+				const fmWeekMatch = fmTitle.match(/\bweek\s*0?(\d+)\b/i) || cand.basename.toLowerCase().match(/\bweek-0?(\d+)\b/i);
+				const sectionWeekNum = fmWeekMatch ? parseInt(fmWeekMatch[1], 10) : (cand.fm.sectionNumber ? parseInt(cand.fm.sectionNumber, 10) : null);
+				if (sectionWeekNum === weekNum) {
+					return { file: cand.file, basename: cand.basename, title: cand.title };
+				}
+			}
+		}
+
+		// Priority 4: Match by due date within section weekStart / weekEnd
+		if (dueIso) {
+			for (const cand of candidateSections) {
+				if (cand.fm.weekStart && cand.fm.weekEnd) {
+					const startStr = String(cand.fm.weekStart).slice(0, 10);
+					const endStr = String(cand.fm.weekEnd).slice(0, 10);
 					if (dueIso >= startStr && dueIso <= endStr) {
-						return {
-							file: child,
-							basename: child.basename,
-							title: fm.title || child.basename
-						};
+						return { file: cand.file, basename: cand.basename, title: cand.title };
 					}
 				}
 			}
 		}
 
 		return null;
+	}
+
+	async findWeeklySectionTask(courseId: string | number, cleanTitle: string, assignment: any): Promise<{ file: TFile; basename: string; title: string } | null> {
+		return this.findParentSectionTask(courseId, cleanTitle, assignment);
 	}
 
 	async processAssignment(assignment: any, skipIfExists: boolean = false) {
@@ -445,9 +500,9 @@ odtuclass-course: "${courseName}"
 
 		let parentTask = courseTask;
 		if (!isSection) {
-			const weeklySection = await this.findWeeklySectionTask(assignment.courseId, cleanTitle, assignment);
-			if (weeklySection) {
-				parentTask = weeklySection;
+			const sectionParent = await this.findParentSectionTask(assignment.courseId, cleanTitle, assignment);
+			if (sectionParent) {
+				parentTask = sectionParent;
 			}
 		}
 

@@ -253,6 +253,8 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
     }
     clean = clean.replace(/^\[.*?\]\s*[^—–-]*[—–-]\s*/, "").trim();
     clean = clean.replace(/^\[.*?\]\s*/, "").trim();
+    clean = clean.replace(/\s+(Interactive Content|Interactive Video|Quiz)$/i, "").trim();
+    clean = clean.replace(/\s+/g, " ").trim();
     if (isSection) {
       const dateMatch = clean.match(/([a-zA-Z]+)\s+(\d{1,2})\s*[-–—]\s*(?:([a-zA-Z]+)\s+)?(\d{1,2})/);
       if (dateMatch && (clean === dateMatch[0] || clean.length <= dateMatch[0].length + 5)) {
@@ -475,7 +477,7 @@ ${subtasksEndMarker}
       await this.app.vault.modify(parentFile, content);
     }
   }
-  async findWeeklySectionTask(courseId, cleanTitle, assignment) {
+  async findParentSectionTask(courseId, cleanTitle, assignment) {
     const courseIdStr = String(courseId);
     const folder = this.app.vault.getAbstractFileByPath(this.settings.outputFolder);
     if (!folder || !(folder instanceof import_obsidian2.TFolder))
@@ -488,6 +490,10 @@ ${subtasksEndMarker}
       weekNum = parseInt(weekMatch[1], 10);
     } else if (assignment.weekNumber) {
       weekNum = parseInt(assignment.weekNumber, 10);
+    } else if (assignment.sectionNumber !== void 0 && assignment.sectionNumber !== null) {
+      const parsedSec = parseInt(assignment.sectionNumber, 10);
+      if (!isNaN(parsedSec))
+        weekNum = parsedSec;
     } else if (/preliminaries|ch\.?\s*0\b/i.test(fullText)) {
       weekNum = 1;
     }
@@ -499,39 +505,74 @@ ${subtasksEndMarker}
         dueIso = d.toISOString().slice(0, 10);
       }
     }
+    const targetSectionId = assignment.sectionId !== void 0 && assignment.sectionId !== null ? String(assignment.sectionId) : "";
+    const targetSectionName = (assignment.sectionName || "").trim().toLowerCase();
+    const candidateSections = [];
     for (const child of folder.children) {
       if (child instanceof import_obsidian2.TFile && child.extension === "md") {
         const cache = this.app.metadataCache.getFileCache(child);
         const fm = cache == null ? void 0 : cache.frontmatter;
         if (!fm)
           continue;
-        const isSameCourse = String(fm["odtuclass-course-id"]) === courseIdStr || typeof fm.id === "string" && fm.id.startsWith(`section:${courseIdStr}:`);
+        const isSameCourse = String(fm["odtuclass-course-id"]) === courseIdStr || typeof fm.id === "string" && (fm.id.startsWith(`section:${courseIdStr}:`) || fm.id.startsWith(`course:${courseIdStr}`));
         if (!isSameCourse)
           continue;
-        const fmTitle = (fm.title || child.basename).toLowerCase();
-        const fmWeekMatch = fmTitle.match(/\bweek\s*0?(\d+)\b/i) || child.basename.toLowerCase().match(/\bweek-0?(\d+)\b/i);
-        const sectionWeekNum = fmWeekMatch ? parseInt(fmWeekMatch[1], 10) : null;
-        if (weekNum !== null && sectionWeekNum === weekNum) {
-          return {
+        if (fm.id === `course:${courseIdStr}`)
+          continue;
+        const isSectionNote = typeof fm.id === "string" && fm.id.startsWith(`section:`) || fm["odtuclass-section-id"] !== void 0 || /\bweek\s*0?\d+\b/i.test(fm.title || child.basename) || /\bweek-\d+\b/i.test(child.basename);
+        if (isSectionNote) {
+          candidateSections.push({
             file: child,
+            fm,
             basename: child.basename,
             title: fm.title || child.basename
-          };
+          });
         }
-        if (dueIso && fm.weekStart && fm.weekEnd) {
-          const startStr = String(fm.weekStart).slice(0, 10);
-          const endStr = String(fm.weekEnd).slice(0, 10);
+      }
+    }
+    if (targetSectionId) {
+      for (const cand of candidateSections) {
+        const fmSectionId = cand.fm["odtuclass-section-id"] ? String(cand.fm["odtuclass-section-id"]) : "";
+        const fmId = typeof cand.fm.id === "string" ? cand.fm.id : "";
+        if (fmSectionId === targetSectionId || fmId === `section:${courseIdStr}:${targetSectionId}` || fmId.endsWith(`:${targetSectionId}`)) {
+          return { file: cand.file, basename: cand.basename, title: cand.title };
+        }
+      }
+    }
+    if (targetSectionName) {
+      for (const cand of candidateSections) {
+        const candTitle = (cand.title || "").toLowerCase();
+        const candBase = cand.basename.toLowerCase();
+        if (candTitle === targetSectionName || candBase === targetSectionName || candTitle.includes(targetSectionName) || targetSectionName.includes(candTitle)) {
+          return { file: cand.file, basename: cand.basename, title: cand.title };
+        }
+      }
+    }
+    if (weekNum !== null) {
+      for (const cand of candidateSections) {
+        const fmTitle = (cand.title || cand.basename).toLowerCase();
+        const fmWeekMatch = fmTitle.match(/\bweek\s*0?(\d+)\b/i) || cand.basename.toLowerCase().match(/\bweek-0?(\d+)\b/i);
+        const sectionWeekNum = fmWeekMatch ? parseInt(fmWeekMatch[1], 10) : cand.fm.sectionNumber ? parseInt(cand.fm.sectionNumber, 10) : null;
+        if (sectionWeekNum === weekNum) {
+          return { file: cand.file, basename: cand.basename, title: cand.title };
+        }
+      }
+    }
+    if (dueIso) {
+      for (const cand of candidateSections) {
+        if (cand.fm.weekStart && cand.fm.weekEnd) {
+          const startStr = String(cand.fm.weekStart).slice(0, 10);
+          const endStr = String(cand.fm.weekEnd).slice(0, 10);
           if (dueIso >= startStr && dueIso <= endStr) {
-            return {
-              file: child,
-              basename: child.basename,
-              title: fm.title || child.basename
-            };
+            return { file: cand.file, basename: cand.basename, title: cand.title };
           }
         }
       }
     }
     return null;
+  }
+  async findWeeklySectionTask(courseId, cleanTitle, assignment) {
+    return this.findParentSectionTask(courseId, cleanTitle, assignment);
   }
   async processAssignment(assignment, skipIfExists = false) {
     var _a;
@@ -540,9 +581,9 @@ ${subtasksEndMarker}
     const cleanTitle = this.cleanItemTitle(assignment.title, assignment.courseName, isSection, assignment);
     let parentTask = courseTask;
     if (!isSection) {
-      const weeklySection = await this.findWeeklySectionTask(assignment.courseId, cleanTitle, assignment);
-      if (weeklySection) {
-        parentTask = weeklySection;
+      const sectionParent = await this.findParentSectionTask(assignment.courseId, cleanTitle, assignment);
+      if (sectionParent) {
+        parentTask = sectionParent;
       }
     }
     const templateName = isSection ? "Section" : this.getTemplateNameForModuleType(assignment.moduleType);
