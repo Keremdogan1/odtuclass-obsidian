@@ -475,11 +475,76 @@ ${subtasksEndMarker}
       await this.app.vault.modify(parentFile, content);
     }
   }
+  async findWeeklySectionTask(courseId, cleanTitle, assignment) {
+    const courseIdStr = String(courseId);
+    const folder = this.app.vault.getAbstractFileByPath(this.settings.outputFolder);
+    if (!folder || !(folder instanceof import_obsidian2.TFolder))
+      return null;
+    let weekNum = null;
+    const rawTitle = assignment.title || "";
+    const fullText = `${cleanTitle} ${rawTitle}`;
+    const weekMatch = fullText.match(/\bweek\s*0?(\d+)\b/i);
+    if (weekMatch) {
+      weekNum = parseInt(weekMatch[1], 10);
+    } else if (assignment.weekNumber) {
+      weekNum = parseInt(assignment.weekNumber, 10);
+    } else if (/preliminaries|ch\.?\s*0\b/i.test(fullText)) {
+      weekNum = 1;
+    }
+    const dueDateStr = assignment.due || assignment.dueDate || assignment.dueAt || "";
+    let dueIso = "";
+    if (dueDateStr) {
+      const d = new Date(dueDateStr);
+      if (!isNaN(d.getTime())) {
+        dueIso = d.toISOString().slice(0, 10);
+      }
+    }
+    for (const child of folder.children) {
+      if (child instanceof import_obsidian2.TFile && child.extension === "md") {
+        const cache = this.app.metadataCache.getFileCache(child);
+        const fm = cache == null ? void 0 : cache.frontmatter;
+        if (!fm)
+          continue;
+        const isSameCourse = String(fm["odtuclass-course-id"]) === courseIdStr || typeof fm.id === "string" && fm.id.startsWith(`section:${courseIdStr}:`);
+        if (!isSameCourse)
+          continue;
+        const fmTitle = (fm.title || child.basename).toLowerCase();
+        const fmWeekMatch = fmTitle.match(/\bweek\s*0?(\d+)\b/i) || child.basename.toLowerCase().match(/\bweek-0?(\d+)\b/i);
+        const sectionWeekNum = fmWeekMatch ? parseInt(fmWeekMatch[1], 10) : null;
+        if (weekNum !== null && sectionWeekNum === weekNum) {
+          return {
+            file: child,
+            basename: child.basename,
+            title: fm.title || child.basename
+          };
+        }
+        if (dueIso && fm.weekStart && fm.weekEnd) {
+          const startStr = String(fm.weekStart).slice(0, 10);
+          const endStr = String(fm.weekEnd).slice(0, 10);
+          if (dueIso >= startStr && dueIso <= endStr) {
+            return {
+              file: child,
+              basename: child.basename,
+              title: fm.title || child.basename
+            };
+          }
+        }
+      }
+    }
+    return null;
+  }
   async processAssignment(assignment, skipIfExists = false) {
     var _a;
     const courseTask = await this.getOrCreateCourseTask(assignment.courseId, assignment.courseName);
     const isSection = assignment.type === "section";
     const cleanTitle = this.cleanItemTitle(assignment.title, assignment.courseName, isSection, assignment);
+    let parentTask = courseTask;
+    if (!isSection) {
+      const weeklySection = await this.findWeeklySectionTask(assignment.courseId, cleanTitle, assignment);
+      if (weeklySection) {
+        parentTask = weeklySection;
+      }
+    }
     const templateName = isSection ? "Section" : this.getTemplateNameForModuleType(assignment.moduleType);
     const templatePath = `${this.settings.templateFolder}/${templateName}.md`;
     const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
@@ -490,8 +555,8 @@ ${subtasksEndMarker}
     }
     const templateContent = await this.app.vault.read(templateFile);
     const renderedContent = this.renderTemplate(templateContent, assignment, {
-      parentFileName: courseTask.basename,
-      parentTitle: courseTask.title,
+      parentFileName: parentTask.basename,
+      parentTitle: parentTask.title,
       cleanTitle
     });
     const safeTitle = cleanTitle.replace(/[\\/:*?"<>|]/g, "-").trim();
@@ -584,7 +649,7 @@ parentId: "${parentLink}"`);
         await this.processSubtasks(assignment, targetFile, cleanTitle);
       }
     }
-    await this.linkChildToParent(courseTask.file, {
+    await this.linkChildToParent(parentTask.file, {
       basename: targetFile.basename,
       title: cleanTitle
     });

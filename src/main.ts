@@ -368,11 +368,88 @@ odtuclass-course: "${courseName}"
 		}
 	}
 
+	async findWeeklySectionTask(courseId: string | number, cleanTitle: string, assignment: any): Promise<{ file: TFile; basename: string; title: string } | null> {
+		const courseIdStr = String(courseId);
+		const folder = this.app.vault.getAbstractFileByPath(this.settings.outputFolder);
+		if (!folder || !(folder instanceof TFolder)) return null;
+
+		// 1. Try to extract week number from cleanTitle or rawTitle
+		let weekNum: number | null = null;
+		const rawTitle = assignment.title || '';
+		const fullText = `${cleanTitle} ${rawTitle}`;
+		const weekMatch = fullText.match(/\bweek\s*0?(\d+)\b/i);
+		if (weekMatch) {
+			weekNum = parseInt(weekMatch[1], 10);
+		} else if (assignment.weekNumber) {
+			weekNum = parseInt(assignment.weekNumber, 10);
+		} else if (/preliminaries|ch\.?\s*0\b/i.test(fullText)) {
+			weekNum = 1;
+		}
+
+		// 2. Check due date if available
+		const dueDateStr = assignment.due || assignment.dueDate || assignment.dueAt || '';
+		let dueIso = '';
+		if (dueDateStr) {
+			const d = new Date(dueDateStr);
+			if (!isNaN(d.getTime())) {
+				dueIso = d.toISOString().slice(0, 10);
+			}
+		}
+
+		for (const child of folder.children) {
+			if (child instanceof TFile && child.extension === 'md') {
+				const cache = this.app.metadataCache.getFileCache(child);
+				const fm = cache?.frontmatter;
+				if (!fm) continue;
+
+				const isSameCourse = String(fm['odtuclass-course-id']) === courseIdStr ||
+					(typeof fm.id === 'string' && fm.id.startsWith(`section:${courseIdStr}:`));
+				if (!isSameCourse) continue;
+
+				const fmTitle = (fm.title || child.basename).toLowerCase();
+				const fmWeekMatch = fmTitle.match(/\bweek\s*0?(\d+)\b/i) || child.basename.toLowerCase().match(/\bweek-0?(\d+)\b/i);
+				const sectionWeekNum = fmWeekMatch ? parseInt(fmWeekMatch[1], 10) : null;
+
+				// Match by week number
+				if (weekNum !== null && sectionWeekNum === weekNum) {
+					return {
+						file: child,
+						basename: child.basename,
+						title: fm.title || child.basename
+					};
+				}
+
+				// Match by due date within section weekStart / weekEnd
+				if (dueIso && fm.weekStart && fm.weekEnd) {
+					const startStr = String(fm.weekStart).slice(0, 10);
+					const endStr = String(fm.weekEnd).slice(0, 10);
+					if (dueIso >= startStr && dueIso <= endStr) {
+						return {
+							file: child,
+							basename: child.basename,
+							title: fm.title || child.basename
+						};
+					}
+				}
+			}
+		}
+
+		return null;
+	}
+
 	async processAssignment(assignment: any, skipIfExists: boolean = false) {
 		const courseTask = await this.getOrCreateCourseTask(assignment.courseId, assignment.courseName);
 
 		const isSection = assignment.type === 'section';
 		const cleanTitle = this.cleanItemTitle(assignment.title, assignment.courseName, isSection, assignment);
+
+		let parentTask = courseTask;
+		if (!isSection) {
+			const weeklySection = await this.findWeeklySectionTask(assignment.courseId, cleanTitle, assignment);
+			if (weeklySection) {
+				parentTask = weeklySection;
+			}
+		}
 
 		const templateName = isSection
 			? 'Section'
@@ -389,8 +466,8 @@ odtuclass-course: "${courseName}"
 
 		const templateContent = await this.app.vault.read(templateFile);
 		const renderedContent = this.renderTemplate(templateContent, assignment, {
-			parentFileName: courseTask.basename,
-			parentTitle: courseTask.title,
+			parentFileName: parentTask.basename,
+			parentTitle: parentTask.title,
 			cleanTitle: cleanTitle
 		});
 		
@@ -508,8 +585,8 @@ odtuclass-course: "${courseName}"
 			}
 		}
 
-		// Link this child task to its Course Task parent
-		await this.linkChildToParent(courseTask.file, {
+		// Link this child task to its parent (weekly section or course task)
+		await this.linkChildToParent(parentTask.file, {
 			basename: targetFile.basename,
 			title: cleanTitle
 		});
