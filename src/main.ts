@@ -778,6 +778,7 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
 			case 'turnitintooltwo':
 			case 'pdf_assignment':
 			case 'recitation':
+			case 'pearson':
 				return 'Assignment';
 			case 'quiz':
 				return 'Quiz';
