@@ -1240,12 +1240,25 @@ class ODTUClassSettingTab extends PluginSettingTab {
 						new Notice('GitHub üzerinde henüz slayt manifestosu (.odtuclass/slides/manifest.json) bulunamadı.');
 						return;
 					}
-					const coursesMap: Record<string, any> = manifest.courses || {};
-					if (manifest.courseCode && Array.isArray(manifest.slides)) {
+					const coursesMap: Record<string, { courseCode: string; courseName: string }> = {};
+					if (manifest.courses && typeof manifest.courses === 'object') {
+						for (const [k, v] of Object.entries(manifest.courses) as [string, any][]) {
+							coursesMap[k] = { courseCode: k, courseName: v?.courseName || k };
+						}
+					}
+					if (manifest.slides && typeof manifest.slides === 'object' && !Array.isArray(manifest.slides)) {
+						for (const slide of Object.values(manifest.slides) as any[]) {
+							if (!slide) continue;
+							const code = String(slide.courseCode || 'CENG111').trim();
+							const name = String(slide.courseName || code).trim();
+							if (!coursesMap[code]) {
+								coursesMap[code] = { courseCode: code, courseName: name };
+							}
+						}
+					} else if (manifest.courseCode && Array.isArray(manifest.slides)) {
 						coursesMap[manifest.courseCode] = {
 							courseCode: manifest.courseCode,
-							courseName: manifest.courseName || manifest.courseCode,
-							slides: manifest.slides
+							courseName: manifest.courseName || manifest.courseCode
 						};
 					}
 					let added = 0;
@@ -1263,7 +1276,7 @@ class ODTUClassSettingTab extends PluginSettingTab {
 					}
 					await this.plugin.saveSettings();
 					this.display();
-					new Notice(added > 0 ? `${added} yeni ders eklendi.` : 'Tüm slaytlı dersler zaten listede.');
+					new Notice(added > 0 ? `${added} yeni ders eklendi.` : `Tüm slaytlı dersler (${Object.keys(coursesMap).join(', ') || 'yok'}) zaten listede.`);
 				}));
 
 		const configs = this.plugin.settings.courseSlideConfigs || {};

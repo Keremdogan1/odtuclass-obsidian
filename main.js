@@ -1408,12 +1408,26 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
         new import_obsidian2.Notice("GitHub \xFCzerinde hen\xFCz slayt manifestosu (.odtuclass/slides/manifest.json) bulunamad\u0131.");
         return;
       }
-      const coursesMap = manifest.courses || {};
-      if (manifest.courseCode && Array.isArray(manifest.slides)) {
+      const coursesMap = {};
+      if (manifest.courses && typeof manifest.courses === "object") {
+        for (const [k, v] of Object.entries(manifest.courses)) {
+          coursesMap[k] = { courseCode: k, courseName: (v == null ? void 0 : v.courseName) || k };
+        }
+      }
+      if (manifest.slides && typeof manifest.slides === "object" && !Array.isArray(manifest.slides)) {
+        for (const slide of Object.values(manifest.slides)) {
+          if (!slide)
+            continue;
+          const code = String(slide.courseCode || "CENG111").trim();
+          const name = String(slide.courseName || code).trim();
+          if (!coursesMap[code]) {
+            coursesMap[code] = { courseCode: code, courseName: name };
+          }
+        }
+      } else if (manifest.courseCode && Array.isArray(manifest.slides)) {
         coursesMap[manifest.courseCode] = {
           courseCode: manifest.courseCode,
-          courseName: manifest.courseName || manifest.courseCode,
-          slides: manifest.slides
+          courseName: manifest.courseName || manifest.courseCode
         };
       }
       let added = 0;
@@ -1431,7 +1445,7 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
       }
       await this.plugin.saveSettings();
       this.display();
-      new import_obsidian2.Notice(added > 0 ? `${added} yeni ders eklendi.` : "T\xFCm slaytl\u0131 dersler zaten listede.");
+      new import_obsidian2.Notice(added > 0 ? `${added} yeni ders eklendi.` : `T\xFCm slaytl\u0131 dersler (${Object.keys(coursesMap).join(", ") || "yok"}) zaten listede.`);
     }));
     const configs = this.plugin.settings.courseSlideConfigs || {};
     for (const [courseCode, cfg] of Object.entries(configs)) {
