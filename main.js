@@ -382,6 +382,24 @@ async function syncAllCourseSlidesFromGithub(plugin, owner, repo, token) {
           replaced++;
         }
       }
+      const numMatch = targetFilename.match(/^(\d+)\.\s+/);
+      if (numMatch && await adapter.exists(targetPath)) {
+        const numPrefix = numMatch[1];
+        try {
+          const files = await adapter.list(slidesDir);
+          for (const existingFile of files.files || []) {
+            const baseName = existingFile.split("/").pop() || "";
+            if (baseName === targetFilename)
+              continue;
+            const existingNumMatch = baseName.match(/^(\d+)\.\s+.*\.pdf$/i);
+            if (existingNumMatch && existingNumMatch[1] === numPrefix && !await adapter.exists(`${existingFile}.annot.json`)) {
+              await adapter.remove(existingFile);
+              replaced++;
+            }
+          }
+        } catch (e) {
+        }
+      }
     }
   }
   return { downloaded, replaced };
