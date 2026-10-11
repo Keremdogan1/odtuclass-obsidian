@@ -4,6 +4,9 @@ export interface ProcessedState {
 	[id: string]: {
 		processedAt: string;
 		contentHash?: string;
+		status?: string;
+		openAt?: string;
+		dueAt?: string;
 	};
 }
 
@@ -68,7 +71,7 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 		items = res.json;
 	} catch (e) {
 		new Notice("ODTUClass: Network error while fetching from GitHub.");
-		console.error("[ODTUClass] GitHub fetch error:", e.message); // Never log the token
+		console.error("[ODTUClass] GitHub fetch error:", e.message);
 		return;
 	}
 
@@ -91,20 +94,7 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 
 	for (const item of items) {
 		if (item.name.endsWith('.json')) {
-			// e.g. assignment-3533-28451.json -> assignment:3533:28451
 			const idStr = item.name.replace('.json', '');
-			const idMatch = idStr.match(/^([a-z]+)-(\d+)-(\d+)$/);
-			let possibleId = idStr;
-			if (idMatch) {
-				possibleId = `${idMatch[1]}:${idMatch[2]}:${idMatch[3]}`;
-			}
-
-			const isPossibleSection = possibleId.startsWith('section:');
-
-			if (state[possibleId] && !isPossibleSection) {
-				skipCount++;
-				continue;
-			}
 
 			try {
 				const fileRes = await requestUrl({
@@ -126,33 +116,28 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 					continue;
 				}
 
-				const isSection = realId.startsWith('section:');
 				const existingEntry = state[realId];
 
-				// Assignments remain create-only: an existing state entry means skip.
-				if (!isSection && existingEntry) {
-					skipCount++;
-					continue;
+				if (existingEntry) {
+					const sameHash = !data.contentHash || existingEntry.contentHash === data.contentHash;
+					const sameStatus = !data.status || existingEntry.status === data.status;
+					const sameOpen = !data.openAt || existingEntry.openAt === data.openAt;
+					const sameDue = !data.dueAt || existingEntry.dueAt === data.dueAt;
+
+					if (sameHash && sameStatus && sameOpen && sameDue) {
+						skipCount++;
+						continue;
+					}
 				}
 
-				// Sections are mutable: only skip when the incoming content is unchanged.
-				if (
-					isSection &&
-					existingEntry?.contentHash &&
-					existingEntry.contentHash === data.contentHash
-				) {
-					skipCount++;
-					continue;
-				}
+				await plugin.processAssignment(data, false);
 
-				await plugin.processAssignment(data, true); // true = skipIfExists
-
-				// Successfully processed, add/update state.
 				state[realId] = {
 					processedAt: new Date().toISOString(),
-					...(isSection && data.contentHash
-						? { contentHash: data.contentHash }
-						: {})
+					...(data.contentHash ? { contentHash: data.contentHash } : {}),
+					...(data.status ? { status: data.status } : {}),
+					...(data.openAt ? { openAt: data.openAt } : {}),
+					...(data.dueAt ? { dueAt: data.dueAt } : {})
 				};
 				stateChanged = true;
 				createdCount++;
@@ -170,65 +155,67 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 
 	let slideStats = { downloaded: 0, replaced: 0 };
 	try {
-		slideStats = await syncCeng111SlidesFromGithub(plugin, owner, repo, token);
+		slideStats = await syncAllCourseSlidesFromGithub(plugin, owner, repo, token);
 	} catch (slideErr) {
-		console.warn("[ODTUClass] Error syncing CENG 111 slides:", slideErr);
+		console.warn("[ODTUClass] Error syncing course slides:", slideErr);
 	}
 
 	const slideMsg =
 		slideStats.downloaded > 0 || slideStats.replaced > 0
-			? ` | Slides: ${slideStats.downloaded} downloaded, ${slideStats.replaced} 2024 slide(s) replaced`
+			? ` | Slides: ${slideStats.downloaded} downloaded, ${slideStats.replaced} replaced`
 			: '';
 
-	new Notice(`ODTUClass Sync: ${createdCount} created, ${skipCount} skipped, ${failCount} failed${slideMsg}.`);
+	new Notice(`ODTUClass Sync: ${createdCount} updated/created, ${skipCount} skipped, ${failCount} failed${slideMsg}.`);
 }
 
-export async function syncCeng111SlidesFromGithub(
+export async function syncAllCourseSlidesFromGithub(
 	plugin: any,
 	owner: string,
 	repo: string,
 	token: string
 ): Promise<{ downloaded: number; replaced: number }> {
 	const adapter = plugin.app.vault.adapter;
-	const slidesDir = 'Courses/CENG111/Slides';
 
-	const manifestApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/CENG111/manifest.json`;
-	let manifestRes;
-	try {
-		manifestRes = await requestUrl({
-			url: manifestApiUrl,
-			method: 'GET',
-			headers: {
-				"Authorization": `Bearer ${token}`,
-				"Accept": "application/vnd.github.v3+json",
-				"User-Agent": "Obsidian-ODTUClass-Plugin"
-			},
-			throw: false
-		});
-	} catch {
-		return { downloaded: 0, replaced: 0 };
-	}
+	// Try universal .odtuclass/slides/manifest.json first, fallback to .odtuclass/slides/CENG111/manifest.json
+	const manifestUrls = [
+		`https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/manifest.json`,
+		`https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/CENG111/manifest.json`,
+	];
 
-	if (!manifestRes || manifestRes.status !== 200 || !manifestRes.json?.download_url) {
-		return { downloaded: 0, replaced: 0 };
-	}
-
-	const rawManifestRes = await requestUrl({
-		url: manifestRes.json.download_url,
-		method: 'GET',
-		headers: {
-			"Authorization": `Bearer ${token}`,
-			"User-Agent": "Obsidian-ODTUClass-Plugin"
+	let manifest: any = null;
+	for (const manifestApiUrl of manifestUrls) {
+		try {
+			const manifestRes = await requestUrl({
+				url: manifestApiUrl,
+				method: 'GET',
+				headers: {
+					"Authorization": `Bearer ${token}`,
+					"Accept": "application/vnd.github.v3+json",
+					"User-Agent": "Obsidian-ODTUClass-Plugin"
+				},
+				throw: false
+			});
+			if (manifestRes && manifestRes.status === 200 && manifestRes.json?.download_url) {
+				const rawManifestRes = await requestUrl({
+					url: manifestRes.json.download_url,
+					method: 'GET',
+					headers: {
+						"Authorization": `Bearer ${token}`,
+						"User-Agent": "Obsidian-ODTUClass-Plugin"
+					}
+				});
+				if (rawManifestRes?.json?.slides) {
+					manifest = rawManifestRes.json;
+					break;
+				}
+			}
+		} catch {
+			// continue
 		}
-	});
+	}
 
-	const manifest = rawManifestRes.json;
 	if (!manifest || typeof manifest.slides !== 'object') {
 		return { downloaded: 0, replaced: 0 };
-	}
-
-	if (!(await adapter.exists(slidesDir))) {
-		await plugin.createFolderRecursive(slidesDir);
 	}
 
 	let downloaded = 0;
@@ -236,12 +223,18 @@ export async function syncCeng111SlidesFromGithub(
 
 	for (const slide of Object.values(manifest.slides) as any[]) {
 		if (!slide || !slide.filename) continue;
+		const courseCode = String(slide.courseCode || 'CENG111').trim();
 		const filename = String(slide.filename);
 		const weekKey = slide.weekKey ? String(slide.weekKey).toLowerCase() : '';
+		const slidesDir = `Courses/${courseCode}/Slides`;
 		const targetPath = `${slidesDir}/${filename}`;
 
+		if (!(await adapter.exists(slidesDir))) {
+			await plugin.createFolderRecursive(slidesDir);
+		}
+
 		if (!(await adapter.exists(targetPath))) {
-			const fileApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/CENG111/${encodeURIComponent(filename)}`;
+			const fileApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/${encodeURIComponent(courseCode)}/${encodeURIComponent(filename)}`;
 			const pdfRes = await requestUrl({
 				url: fileApiUrl,
 				method: 'GET',
@@ -271,4 +264,3 @@ export async function syncCeng111SlidesFromGithub(
 
 	return { downloaded, replaced };
 }
-

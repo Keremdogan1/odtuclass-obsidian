@@ -103,16 +103,6 @@ async function syncFromGithub(plugin) {
   for (const item of items) {
     if (item.name.endsWith(".json")) {
       const idStr = item.name.replace(".json", "");
-      const idMatch = idStr.match(/^([a-z]+)-(\d+)-(\d+)$/);
-      let possibleId = idStr;
-      if (idMatch) {
-        possibleId = `${idMatch[1]}:${idMatch[2]}:${idMatch[3]}`;
-      }
-      const isPossibleSection = possibleId.startsWith("section:");
-      if (state[possibleId] && !isPossibleSection) {
-        skipCount++;
-        continue;
-      }
       try {
         const fileRes = await (0, import_obsidian.requestUrl)({
           url: item.download_url,
@@ -130,20 +120,24 @@ async function syncFromGithub(plugin) {
           failCount++;
           continue;
         }
-        const isSection = realId.startsWith("section:");
         const existingEntry = state[realId];
-        if (!isSection && existingEntry) {
-          skipCount++;
-          continue;
+        if (existingEntry) {
+          const sameHash = !data.contentHash || existingEntry.contentHash === data.contentHash;
+          const sameStatus = !data.status || existingEntry.status === data.status;
+          const sameOpen = !data.openAt || existingEntry.openAt === data.openAt;
+          const sameDue = !data.dueAt || existingEntry.dueAt === data.dueAt;
+          if (sameHash && sameStatus && sameOpen && sameDue) {
+            skipCount++;
+            continue;
+          }
         }
-        if (isSection && (existingEntry == null ? void 0 : existingEntry.contentHash) && existingEntry.contentHash === data.contentHash) {
-          skipCount++;
-          continue;
-        }
-        await plugin.processAssignment(data, true);
+        await plugin.processAssignment(data, false);
         state[realId] = {
           processedAt: new Date().toISOString(),
-          ...isSection && data.contentHash ? { contentHash: data.contentHash } : {}
+          ...data.contentHash ? { contentHash: data.contentHash } : {},
+          ...data.status ? { status: data.status } : {},
+          ...data.openAt ? { openAt: data.openAt } : {},
+          ...data.dueAt ? { dueAt: data.dueAt } : {}
         };
         stateChanged = true;
         createdCount++;
@@ -158,61 +152,68 @@ async function syncFromGithub(plugin) {
   }
   let slideStats = { downloaded: 0, replaced: 0 };
   try {
-    slideStats = await syncCeng111SlidesFromGithub(plugin, owner, repo, token);
+    slideStats = await syncAllCourseSlidesFromGithub(plugin, owner, repo, token);
   } catch (slideErr) {
-    console.warn("[ODTUClass] Error syncing CENG 111 slides:", slideErr);
+    console.warn("[ODTUClass] Error syncing course slides:", slideErr);
   }
-  const slideMsg = slideStats.downloaded > 0 || slideStats.replaced > 0 ? ` | Slides: ${slideStats.downloaded} downloaded, ${slideStats.replaced} 2024 slide(s) replaced` : "";
-  new import_obsidian.Notice(`ODTUClass Sync: ${createdCount} created, ${skipCount} skipped, ${failCount} failed${slideMsg}.`);
+  const slideMsg = slideStats.downloaded > 0 || slideStats.replaced > 0 ? ` | Slides: ${slideStats.downloaded} downloaded, ${slideStats.replaced} replaced` : "";
+  new import_obsidian.Notice(`ODTUClass Sync: ${createdCount} updated/created, ${skipCount} skipped, ${failCount} failed${slideMsg}.`);
 }
-async function syncCeng111SlidesFromGithub(plugin, owner, repo, token) {
-  var _a;
+async function syncAllCourseSlidesFromGithub(plugin, owner, repo, token) {
+  var _a, _b;
   const adapter = plugin.app.vault.adapter;
-  const slidesDir = "Courses/CENG111/Slides";
-  const manifestApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/CENG111/manifest.json`;
-  let manifestRes;
-  try {
-    manifestRes = await (0, import_obsidian.requestUrl)({
-      url: manifestApiUrl,
-      method: "GET",
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "Obsidian-ODTUClass-Plugin"
-      },
-      throw: false
-    });
-  } catch (e) {
-    return { downloaded: 0, replaced: 0 };
-  }
-  if (!manifestRes || manifestRes.status !== 200 || !((_a = manifestRes.json) == null ? void 0 : _a.download_url)) {
-    return { downloaded: 0, replaced: 0 };
-  }
-  const rawManifestRes = await (0, import_obsidian.requestUrl)({
-    url: manifestRes.json.download_url,
-    method: "GET",
-    headers: {
-      "Authorization": `Bearer ${token}`,
-      "User-Agent": "Obsidian-ODTUClass-Plugin"
+  const manifestUrls = [
+    `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/manifest.json`,
+    `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/CENG111/manifest.json`
+  ];
+  let manifest = null;
+  for (const manifestApiUrl of manifestUrls) {
+    try {
+      const manifestRes = await (0, import_obsidian.requestUrl)({
+        url: manifestApiUrl,
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Accept": "application/vnd.github.v3+json",
+          "User-Agent": "Obsidian-ODTUClass-Plugin"
+        },
+        throw: false
+      });
+      if (manifestRes && manifestRes.status === 200 && ((_a = manifestRes.json) == null ? void 0 : _a.download_url)) {
+        const rawManifestRes = await (0, import_obsidian.requestUrl)({
+          url: manifestRes.json.download_url,
+          method: "GET",
+          headers: {
+            "Authorization": `Bearer ${token}`,
+            "User-Agent": "Obsidian-ODTUClass-Plugin"
+          }
+        });
+        if ((_b = rawManifestRes == null ? void 0 : rawManifestRes.json) == null ? void 0 : _b.slides) {
+          manifest = rawManifestRes.json;
+          break;
+        }
+      }
+    } catch (e) {
     }
-  });
-  const manifest = rawManifestRes.json;
+  }
   if (!manifest || typeof manifest.slides !== "object") {
     return { downloaded: 0, replaced: 0 };
-  }
-  if (!await adapter.exists(slidesDir)) {
-    await plugin.createFolderRecursive(slidesDir);
   }
   let downloaded = 0;
   let replaced = 0;
   for (const slide of Object.values(manifest.slides)) {
     if (!slide || !slide.filename)
       continue;
+    const courseCode = String(slide.courseCode || "CENG111").trim();
     const filename = String(slide.filename);
     const weekKey = slide.weekKey ? String(slide.weekKey).toLowerCase() : "";
+    const slidesDir = `Courses/${courseCode}/Slides`;
     const targetPath = `${slidesDir}/${filename}`;
+    if (!await adapter.exists(slidesDir)) {
+      await plugin.createFolderRecursive(slidesDir);
+    }
     if (!await adapter.exists(targetPath)) {
-      const fileApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/CENG111/${encodeURIComponent(filename)}`;
+      const fileApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/${encodeURIComponent(courseCode)}/${encodeURIComponent(filename)}`;
       const pdfRes = await (0, import_obsidian.requestUrl)({
         url: fileApiUrl,
         method: "GET",
@@ -683,7 +684,6 @@ ${subtasksEndMarker}
     return this.findParentSectionTask(courseId, cleanTitle, assignment);
   }
   async processAssignment(assignment, skipIfExists = false) {
-    var _a;
     const courseTask = await this.getOrCreateCourseTask(assignment.courseId, assignment.courseName);
     const isSection = assignment.type === "section";
     const cleanTitle = this.cleanItemTitle(assignment.title, assignment.courseName, isSection, assignment);
@@ -718,6 +718,7 @@ ${subtasksEndMarker}
     } else {
       const folder = this.app.vault.getAbstractFileByPath(this.settings.outputFolder);
       if (folder && folder instanceof import_obsidian2.TFolder) {
+        const normCleanTitle = cleanTitle.toLowerCase().replace(/[^a-z0-9]+/g, "");
         for (const child of folder.children) {
           if (child instanceof import_obsidian2.TFile && child.extension === "md") {
             if (child.basename.endsWith(`- ${safeId}`)) {
@@ -725,7 +726,12 @@ ${subtasksEndMarker}
               break;
             }
             const cache = this.app.metadataCache.getFileCache(child);
-            if (((_a = cache == null ? void 0 : cache.frontmatter) == null ? void 0 : _a.id) === assignment.id) {
+            const fm = cache == null ? void 0 : cache.frontmatter;
+            if ((fm == null ? void 0 : fm.id) === assignment.id) {
+              existingFile = child;
+              break;
+            }
+            if (assignment.moduleType === "pearson" && fm && String(fm["odtuclass-course-id"]) === String(assignment.courseId) && typeof fm.title === "string" && fm.title.toLowerCase().replace(/[^a-z0-9]+/g, "") === normCleanTitle) {
               existingFile = child;
               break;
             }
@@ -778,33 +784,64 @@ parentId: "${parentLink}"`);
         }
       } else {
         if (!skipIfExists) {
-          let updatedContent = renderedContent;
           const existingContent = await this.app.vault.read(existingFile);
+          let updatedContent = existingContent;
           const existingStatusMatch = existingContent.match(/^status:\s*["']?([^"'\r\n]+)["']?/m);
           const existingStatus = existingStatusMatch ? existingStatusMatch[1].trim() : "todo";
-          const finalStatus = existingStatus === "done" || assignment.status === "done" ? "done" : existingStatus;
-          if (finalStatus !== "todo") {
-            updatedContent = updatedContent.replace(/^status:\s*.*$/m, `status: "${finalStatus}"`);
+          let finalStatus = existingStatus;
+          if (existingStatus === "done" || assignment.status === "done") {
+            finalStatus = "done";
+          } else if (assignment.status === "in-progress" && existingStatus === "todo") {
+            finalStatus = "in-progress";
           }
-          const notesHeader = "## Description";
-          if (existingContent.includes(notesHeader)) {
-            const descIdx = existingContent.indexOf(notesHeader);
-            const userDesc = existingContent.slice(descIdx);
-            const newDescIdx = updatedContent.indexOf(notesHeader);
-            if (newDescIdx !== -1) {
-              updatedContent = updatedContent.slice(0, newDescIdx) + userDesc;
+          updatedContent = updatedContent.replace(/^status:\s*.*$/m, `status: "${finalStatus}"`);
+          const open = this.formatOdtuclassDate(assignment.openAt);
+          const due = this.formatOdtuclassDate(assignment.dueAt);
+          if (open.date) {
+            if (/^start:\s*.*$/m.test(updatedContent)) {
+              updatedContent = updatedContent.replace(/^start:\s*.*$/m, `start: "${open.date}"`);
+            } else {
+              updatedContent = updatedContent.replace(/^due:\s*.*$/m, `start: "${open.date}"
+$&`);
+            }
+            if (/^opened:\s*.*$/m.test(updatedContent)) {
+              updatedContent = updatedContent.replace(/^opened:\s*.*$/m, `opened: "${open.date}"`);
+            }
+            const openDisplay = `${open.date}${open.time ? ` ${open.time}` : ""}`;
+            if (/^-\s*\*\*(?:Açılış|Başlangıç):\*\*\s*.*$/m.test(updatedContent)) {
+              updatedContent = updatedContent.replace(/^-\s*\*\*(Açılış|Başlangıç):\*\*\s*.*$/m, `- **$1:** ${openDisplay}`);
+            } else if (/^-\s*\*\*Teslim:\*\*\s*.*$/m.test(updatedContent)) {
+              updatedContent = updatedContent.replace(/^-\s*\*\*Teslim:\*\*\s*.*$/m, `- **Ba\u015Flang\u0131\xE7:** ${openDisplay}
+$&`);
             }
           }
+          if (due.date) {
+            updatedContent = updatedContent.replace(/^due:\s*.*$/m, `due: "${due.date}"`);
+            const dueDisplay = `${due.date}${due.time ? ` ${due.time}` : ""}`;
+            updatedContent = updatedContent.replace(/^(-\s*\*\*Teslim:\*\*\s*).*$/m, `$1${dueDisplay}`);
+          }
           const expectedDurum = finalStatus === "done" ? "Tamamland\u0131" : finalStatus === "in-progress" ? "Devam Ediyor" : "Yap\u0131lacak";
-          updatedContent = updatedContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1${expectedDurum}`);
-          await this.app.vault.modify(existingFile, updatedContent);
+          if (/^-\s*\*\*Durum:\*\*\s*.*$/m.test(updatedContent)) {
+            updatedContent = updatedContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1${expectedDurum}`);
+          }
+          if (updatedContent !== existingContent) {
+            await this.app.vault.modify(existingFile, updatedContent);
+          }
         }
       }
     } else {
       let initialContent = renderedContent;
+      const open = this.formatOdtuclassDate(assignment.openAt);
+      if (open.date && !/^start:\s*.*$/m.test(initialContent)) {
+        initialContent = initialContent.replace(/^due:\s*.*$/m, `start: "${open.date}"
+$&`);
+      }
       if (assignment.status === "done") {
         initialContent = initialContent.replace(/^status:\s*.*$/m, `status: "done"`);
         initialContent = initialContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1Tamamland\u0131`);
+      } else if (assignment.status === "in-progress") {
+        initialContent = initialContent.replace(/^status:\s*.*$/m, `status: "in-progress"`);
+        initialContent = initialContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1Devam Ediyor`);
       }
       targetFile = await this.app.vault.create(outputPath, initialContent);
       if (isSection && assignment.suggestedProblems && Array.isArray(assignment.suggestedProblems) && assignment.suggestedProblems.length > 0) {

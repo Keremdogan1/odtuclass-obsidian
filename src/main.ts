@@ -561,7 +561,7 @@ odtuclass-course: "${courseName}"
 		
 		const outputPath = `${this.settings.outputFolder}/${safeTitle} - ${safeId}.md`;
 		
-		// Find existing file either by exact outputPath or by ID in filename / frontmatter
+		// Find existing file either by exact outputPath or by ID / Pearson title in filename / frontmatter
 		let existingFile: TFile | null = null;
 		const directFile = this.app.vault.getAbstractFileByPath(outputPath);
 		if (directFile && directFile instanceof TFile) {
@@ -569,6 +569,7 @@ odtuclass-course: "${courseName}"
 		} else {
 			const folder = this.app.vault.getAbstractFileByPath(this.settings.outputFolder);
 			if (folder && folder instanceof TFolder) {
+				const normCleanTitle = cleanTitle.toLowerCase().replace(/[^a-z0-9]+/g, '');
 				for (const child of folder.children) {
 					if (child instanceof TFile && child.extension === 'md') {
 						if (child.basename.endsWith(`- ${safeId}`)) {
@@ -576,7 +577,18 @@ odtuclass-course: "${courseName}"
 							break;
 						}
 						const cache = this.app.metadataCache.getFileCache(child);
-						if (cache?.frontmatter?.id === assignment.id) {
+						const fm = cache?.frontmatter;
+						if (fm?.id === assignment.id) {
+							existingFile = child;
+							break;
+						}
+						if (
+							assignment.moduleType === 'pearson' &&
+							fm &&
+							String(fm['odtuclass-course-id']) === String(assignment.courseId) &&
+							typeof fm.title === 'string' &&
+							fm.title.toLowerCase().replace(/[^a-z0-9]+/g, '') === normCleanTitle
+						) {
 							existingFile = child;
 							break;
 						}
@@ -649,40 +661,68 @@ odtuclass-course: "${courseName}"
 				}
 			} else {
 				if (!skipIfExists) {
-					let updatedContent = renderedContent;
 					const existingContent = await this.app.vault.read(existingFile);
+					let updatedContent = existingContent;
 
 					const existingStatusMatch = existingContent.match(/^status:\s*["']?([^"'\r\n]+)["']?/m);
 					const existingStatus = existingStatusMatch ? existingStatusMatch[1].trim() : 'todo';
-					const finalStatus = (existingStatus === 'done' || assignment.status === 'done')
-						? 'done'
-						: existingStatus;
-
-					if (finalStatus !== 'todo') {
-						updatedContent = updatedContent.replace(/^status:\s*.*$/m, `status: "${finalStatus}"`);
+					let finalStatus = existingStatus;
+					if (existingStatus === 'done' || assignment.status === 'done') {
+						finalStatus = 'done';
+					} else if (assignment.status === 'in-progress' && existingStatus === 'todo') {
+						finalStatus = 'in-progress';
 					}
 
-					const notesHeader = '## Description';
-					if (existingContent.includes(notesHeader)) {
-						const descIdx = existingContent.indexOf(notesHeader);
-						const userDesc = existingContent.slice(descIdx);
-						const newDescIdx = updatedContent.indexOf(notesHeader);
-						if (newDescIdx !== -1) {
-							updatedContent = updatedContent.slice(0, newDescIdx) + userDesc;
+					updatedContent = updatedContent.replace(/^status:\s*.*$/m, `status: "${finalStatus}"`);
+
+					const open = this.formatOdtuclassDate(assignment.openAt);
+					const due = this.formatOdtuclassDate(assignment.dueAt);
+
+					if (open.date) {
+						if (/^start:\s*.*$/m.test(updatedContent)) {
+							updatedContent = updatedContent.replace(/^start:\s*.*$/m, `start: "${open.date}"`);
+						} else {
+							updatedContent = updatedContent.replace(/^due:\s*.*$/m, `start: "${open.date}"\n$&`);
+						}
+						if (/^opened:\s*.*$/m.test(updatedContent)) {
+							updatedContent = updatedContent.replace(/^opened:\s*.*$/m, `opened: "${open.date}"`);
+						}
+						const openDisplay = `${open.date}${open.time ? ` ${open.time}` : ''}`;
+						if (/^-\s*\*\*(?:Açılış|Başlangıç):\*\*\s*.*$/m.test(updatedContent)) {
+							updatedContent = updatedContent.replace(/^-\s*\*\*(Açılış|Başlangıç):\*\*\s*.*$/m, `- **$1:** ${openDisplay}`);
+						} else if (/^-\s*\*\*Teslim:\*\*\s*.*$/m.test(updatedContent)) {
+							updatedContent = updatedContent.replace(/^-\s*\*\*Teslim:\*\*\s*.*$/m, `- **Başlangıç:** ${openDisplay}\n$&`);
 						}
 					}
 
-					const expectedDurum = finalStatus === 'done' ? 'Tamamlandı' : (finalStatus === 'in-progress' ? 'Devam Ediyor' : 'Yapılacak');
-					updatedContent = updatedContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1${expectedDurum}`);
+					if (due.date) {
+						updatedContent = updatedContent.replace(/^due:\s*.*$/m, `due: "${due.date}"`);
+						const dueDisplay = `${due.date}${due.time ? ` ${due.time}` : ''}`;
+						updatedContent = updatedContent.replace(/^(-\s*\*\*Teslim:\*\*\s*).*$/m, `$1${dueDisplay}`);
+					}
 
-					await this.app.vault.modify(existingFile, updatedContent);
+					const expectedDurum = finalStatus === 'done' ? 'Tamamlandı' : (finalStatus === 'in-progress' ? 'Devam Ediyor' : 'Yapılacak');
+					if (/^-\s*\*\*Durum:\*\*\s*.*$/m.test(updatedContent)) {
+						updatedContent = updatedContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1${expectedDurum}`);
+					}
+
+					if (updatedContent !== existingContent) {
+						await this.app.vault.modify(existingFile, updatedContent);
+					}
 				}
 			}
 		} else {
 			let initialContent = renderedContent;
+			const open = this.formatOdtuclassDate(assignment.openAt);
+			if (open.date && !/^start:\s*.*$/m.test(initialContent)) {
+				initialContent = initialContent.replace(/^due:\s*.*$/m, `start: "${open.date}"\n$&`);
+			}
 			if (assignment.status === 'done') {
 				initialContent = initialContent.replace(/^status:\s*.*$/m, `status: "done"`);
 				initialContent = initialContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1Tamamlandı`);
+			} else if (assignment.status === 'in-progress') {
+				initialContent = initialContent.replace(/^status:\s*.*$/m, `status: "in-progress"`);
+				initialContent = initialContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1Devam Ediyor`);
 			}
 			targetFile = (await this.app.vault.create(outputPath, initialContent)) as TFile;
 			if (isSection && assignment.suggestedProblems && Array.isArray(assignment.suggestedProblems) && assignment.suggestedProblems.length > 0) {
