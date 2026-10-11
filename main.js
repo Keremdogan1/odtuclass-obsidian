@@ -603,15 +603,27 @@ ${subtasksEndMarker}
       const parsedSec = parseInt(assignment.sectionNumber, 10);
       if (!isNaN(parsedSec))
         weekNum = parsedSec;
-    } else if (/preliminaries|ch\.?\s*0\b/i.test(fullText)) {
+    } else if (/preliminaries|ch\.?\s*0\b|physics\s+primer|mathematics\s+review|introduction\s+to\s+mastering/i.test(fullText)) {
       weekNum = 1;
+    } else if (/limit\s+and\s+continuity.*basics/i.test(fullText)) {
+      weekNum = 2;
+    } else if (/formal\s+definitions.*differentiation/i.test(fullText)) {
+      weekNum = 3;
     }
     const dueDateStr = assignment.due || assignment.dueDate || assignment.dueAt || "";
     let dueIso = "";
     if (dueDateStr) {
       const d = new Date(dueDateStr);
       if (!isNaN(d.getTime())) {
-        dueIso = d.toISOString().slice(0, 10);
+        dueIso = this.formatOdtuclassDate(dueDateStr).date;
+      }
+    }
+    const openDateStr = assignment.start || assignment.openDate || assignment.openAt || "";
+    let openIso = "";
+    if (openDateStr) {
+      const d = new Date(openDateStr);
+      if (!isNaN(d.getTime())) {
+        openIso = this.formatOdtuclassDate(openDateStr).date;
       }
     }
     const targetSectionId = assignment.sectionId !== void 0 && assignment.sectionId !== null ? String(assignment.sectionId) : "";
@@ -664,6 +676,17 @@ ${subtasksEndMarker}
         const sectionWeekNum = fmWeekMatch ? parseInt(fmWeekMatch[1], 10) : cand.fm.sectionNumber ? parseInt(cand.fm.sectionNumber, 10) : null;
         if (sectionWeekNum === weekNum) {
           return { file: cand.file, basename: cand.basename, title: cand.title };
+        }
+      }
+    }
+    if (openIso) {
+      for (const cand of candidateSections) {
+        if (cand.fm.weekStart && cand.fm.weekEnd) {
+          const startStr = String(cand.fm.weekStart).slice(0, 10);
+          const endStr = String(cand.fm.weekEnd).slice(0, 10);
+          if (openIso >= startStr && openIso <= endStr) {
+            return { file: cand.file, basename: cand.basename, title: cand.title };
+          }
         }
       }
     }
