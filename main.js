@@ -156,7 +156,88 @@ async function syncFromGithub(plugin) {
   if (stateChanged) {
     await saveProcessedState(plugin.app.vault.adapter, state);
   }
-  new import_obsidian.Notice(`ODTUClass Sync: ${createdCount} created, ${skipCount} skipped, ${failCount} failed.`);
+  let slideStats = { downloaded: 0, replaced: 0 };
+  try {
+    slideStats = await syncCeng111SlidesFromGithub(plugin, owner, repo, token);
+  } catch (slideErr) {
+    console.warn("[ODTUClass] Error syncing CENG 111 slides:", slideErr);
+  }
+  const slideMsg = slideStats.downloaded > 0 || slideStats.replaced > 0 ? ` | Slides: ${slideStats.downloaded} downloaded, ${slideStats.replaced} 2024 slide(s) replaced` : "";
+  new import_obsidian.Notice(`ODTUClass Sync: ${createdCount} created, ${skipCount} skipped, ${failCount} failed${slideMsg}.`);
+}
+async function syncCeng111SlidesFromGithub(plugin, owner, repo, token) {
+  var _a;
+  const adapter = plugin.app.vault.adapter;
+  const slidesDir = "Courses/CENG111/Slides";
+  const manifestApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/CENG111/manifest.json`;
+  let manifestRes;
+  try {
+    manifestRes = await (0, import_obsidian.requestUrl)({
+      url: manifestApiUrl,
+      method: "GET",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "Obsidian-ODTUClass-Plugin"
+      },
+      throw: false
+    });
+  } catch (e) {
+    return { downloaded: 0, replaced: 0 };
+  }
+  if (!manifestRes || manifestRes.status !== 200 || !((_a = manifestRes.json) == null ? void 0 : _a.download_url)) {
+    return { downloaded: 0, replaced: 0 };
+  }
+  const rawManifestRes = await (0, import_obsidian.requestUrl)({
+    url: manifestRes.json.download_url,
+    method: "GET",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "User-Agent": "Obsidian-ODTUClass-Plugin"
+    }
+  });
+  const manifest = rawManifestRes.json;
+  if (!manifest || typeof manifest.slides !== "object") {
+    return { downloaded: 0, replaced: 0 };
+  }
+  if (!await adapter.exists(slidesDir)) {
+    await plugin.createFolderRecursive(slidesDir);
+  }
+  let downloaded = 0;
+  let replaced = 0;
+  for (const slide of Object.values(manifest.slides)) {
+    if (!slide || !slide.filename)
+      continue;
+    const filename = String(slide.filename);
+    const weekKey = slide.weekKey ? String(slide.weekKey).toLowerCase() : "";
+    const targetPath = `${slidesDir}/${filename}`;
+    if (!await adapter.exists(targetPath)) {
+      const fileApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/CENG111/${encodeURIComponent(filename)}`;
+      const pdfRes = await (0, import_obsidian.requestUrl)({
+        url: fileApiUrl,
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Accept": "application/vnd.github.v3.raw",
+          "User-Agent": "Obsidian-ODTUClass-Plugin"
+        },
+        throw: false
+      });
+      if (pdfRes && pdfRes.status === 200 && pdfRes.arrayBuffer) {
+        await adapter.writeBinary(targetPath, pdfRes.arrayBuffer);
+        downloaded++;
+      }
+    }
+    if (weekKey && await adapter.exists(targetPath)) {
+      const old2024Path = `${slidesDir}/2024 Week ${weekKey}.pdf`;
+      const old2024AnnotPath = `${old2024Path}.annot.json`;
+      if (await adapter.exists(old2024Path) && !await adapter.exists(old2024AnnotPath)) {
+        await adapter.remove(old2024Path);
+        replaced++;
+      }
+    }
+  }
+  return { downloaded, replaced };
 }
 
 // src/main.ts
