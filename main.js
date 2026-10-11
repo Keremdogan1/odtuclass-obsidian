@@ -204,7 +204,14 @@ async function syncFromGithub(plugin) {
   let skipCount = 0;
   let failCount = 0;
   let stateChanged = false;
-  for (const item of items) {
+  const sortedItems = [...items].sort((a, b) => {
+    const aIsSec = typeof (a == null ? void 0 : a.name) === "string" && a.name.startsWith("section-") ? 0 : 1;
+    const bIsSec = typeof (b == null ? void 0 : b.name) === "string" && b.name.startsWith("section-") ? 0 : 1;
+    if (aIsSec !== bIsSec)
+      return aIsSec - bIsSec;
+    return String((a == null ? void 0 : a.name) || "").localeCompare(String((b == null ? void 0 : b.name) || ""));
+  });
+  for (const item of sortedItems) {
     if (item.name.endsWith(".json")) {
       const idStr = item.name.replace(".json", "");
       try {
@@ -721,30 +728,60 @@ odtuclass-course: "${courseName}"
   async linkChildToParent(parentFile, childRef) {
     let content = await this.app.vault.read(parentFile);
     const childLink = `[[${childRef.basename}|${childRef.title}]]`;
-    const childEntryYaml = `  - "${childLink}"`;
     let changed = false;
-    if (!content.includes(`[[${childRef.basename}`)) {
-      const subtaskIdsRegex = /^subtaskIds:\s*(\[\]|.*)$/m;
-      if (subtaskIdsRegex.test(content)) {
-        const currentMatch = content.match(subtaskIdsRegex);
-        if (currentMatch && currentMatch[1].trim() === "[]") {
-          content = content.replace(subtaskIdsRegex, `subtaskIds:
-${childEntryYaml}`);
-        } else {
-          content = content.replace(/^subtaskIds:\s*\n?/m, `subtaskIds:
-${childEntryYaml}
-`);
+    const fmRegex = /^---\r?\n([\s\S]*?)\r?\n---/;
+    const fmMatch = content.match(fmRegex);
+    if (fmMatch) {
+      let fmText = fmMatch[1];
+      const subtaskBlockRegex = /^subtaskIds:[ \t]*(?:(\[[^\r\n]*\])|[ \t]*(?:\r?\n((?:[ \t]*-[ \t]+[^\r\n]+\r?\n?)*))?)/m;
+      const blockMatch = fmText.match(subtaskBlockRegex);
+      const existingItems = [];
+      if (blockMatch) {
+        if (blockMatch[1]) {
+          const inlineVal = blockMatch[1].trim();
+          if (inlineVal !== "[]") {
+            try {
+              const parsed = JSON.parse(inlineVal);
+              if (Array.isArray(parsed)) {
+                for (const item of parsed) {
+                  if (typeof item === "string" && item.trim()) {
+                    existingItems.push(item.trim());
+                  }
+                }
+              }
+            } catch (e) {
+              const linkMatches = inlineVal.match(/\[\[.*?\]\]/g) || [];
+              existingItems.push(...linkMatches);
+            }
+          }
+        } else if (blockMatch[2]) {
+          const lines = blockMatch[2].split(/\r?\n/);
+          for (const line of lines) {
+            const m = line.match(/^[ \t]*-[ \t]+(.*?)\s*$/);
+            if (m && m[1]) {
+              existingItems.push(m[1].replace(/^["']|["']$/g, "").trim());
+            }
+          }
         }
-      } else {
-        content = content.replace(/^---\n([\s\S]*?)\n---/m, (match, p1) => {
-          return `---
-${p1}
-subtaskIds:
-${childEntryYaml}
----`;
-        });
       }
-      changed = true;
+      const alreadyHas = existingItems.some(
+        (item) => item.includes(`[[${childRef.basename}|`) || item.includes(`[[${childRef.basename}]]`)
+      );
+      if (!alreadyHas) {
+        existingItems.push(childLink);
+        const yamlList = existingItems.length > 0 ? `subtaskIds:
+${existingItems.map((it) => `  - "${it}"`).join("\n")}` : `subtaskIds: []`;
+        if (blockMatch) {
+          fmText = fmText.replace(subtaskBlockRegex, yamlList);
+        } else {
+          fmText = `${fmText.trimEnd()}
+${yamlList}`;
+        }
+        content = content.replace(fmRegex, `---
+${fmText}
+---`);
+        changed = true;
+      }
     }
     const subtasksBeginMarker = "<!-- ODTUCLASS:SUBTASKS:BEGIN -->";
     const subtasksEndMarker = "<!-- ODTUCLASS:SUBTASKS:END -->";
@@ -768,7 +805,6 @@ ${childEntryYaml}
           const nextSectionMatch = afterHeader.search(/\n##\s+/);
           const insertPoint = nextSectionMatch !== -1 ? headerIdx + subtasksHeader.length + nextSectionMatch : content.length;
           const newSubtaskLine = `
-
 - [ ] ${childLink}`;
           content = content.slice(0, insertPoint) + newSubtaskLine + content.slice(insertPoint);
           changed = true;
@@ -952,7 +988,7 @@ ${subtasksEndMarker}
       parentTitle: parentTask.title,
       cleanTitle
     });
-    const safeTitle = cleanTitle.replace(/[\\/:*?"<>|]/g, "-").trim();
+    const safeTitle = cleanTitle.replace(/[\\/:*?"<>|\[\]]/g, "-").trim();
     const safeId = assignment.id.replace(/[^a-zA-Z0-9.-]/g, "-");
     const outputPath = `${this.settings.outputFolder}/${safeTitle} - ${safeId}.md`;
     let existingFile = null;
@@ -1018,7 +1054,9 @@ ${subtasksEndMarker}
           );
         }
         const parentLink = `[[${courseTask.basename}|${courseTask.title}]]`;
-        if (!updatedContent.match(/^parentId:\s*.*$/m)) {
+        if (/^parentId:\s*.*$/m.test(updatedContent)) {
+          updatedContent = updatedContent.replace(/^parentId:\s*.*$/m, `parentId: "${parentLink}"`);
+        } else {
           updatedContent = updatedContent.replace(/^type:\s*.*$/m, `type: "subtask"
 parentId: "${parentLink}"`);
         }
@@ -1030,6 +1068,14 @@ parentId: "${parentLink}"`);
         if (!skipIfExists) {
           const existingContent = await this.app.vault.read(existingFile);
           let updatedContent = existingContent;
+          const expectedParentLink = `[[${parentTask.basename}|${parentTask.title}]]`;
+          if (/^parentId:\s*.*$/m.test(updatedContent)) {
+            updatedContent = updatedContent.replace(/^parentId:\s*.*$/m, `parentId: "${expectedParentLink}"`);
+          } else {
+            updatedContent = updatedContent.replace(/^type:\s*.*$/m, `type: "subtask"
+parentId: "${expectedParentLink}"`);
+          }
+          updatedContent = updatedContent.replace(/^type:\s*.*$/m, `type: "subtask"`);
           const existingStatusMatch = existingContent.match(/^status:\s*["']?([^"'\r\n]+)["']?/m);
           const existingStatus = existingStatusMatch ? existingStatusMatch[1].trim() : "todo";
           let finalStatus = existingStatus;
@@ -1136,6 +1182,7 @@ type: "subtask"
 status: "todo"
 priority: "medium"
 due: "{{dueDate}}"
+subtaskIds: []
 tags:
   - odtuclass
   - coursework
@@ -1163,7 +1210,7 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
       const topicTitle = item.title ? ` ${item.title}` : "";
       const subtaskTitle = `${sectionNum}${topicTitle} \u2014 Suggested Problems`;
       const subtaskId = `${assignment.id}:subtask:${sectionNum}`;
-      const safeSubtaskTitle = subtaskTitle.replace(/[\\/:*?"<>|]/g, "-").trim();
+      const safeSubtaskTitle = subtaskTitle.replace(/[\\/:*?"<>|\[\]]/g, "-").trim();
       const fullSubtaskBasename = `${weekPrefix}${safeSubtaskTitle}`;
       const subtaskFileName = `${fullSubtaskBasename}.md`;
       const subtaskPath = `${this.settings.outputFolder}/${subtaskFileName}`;
@@ -1213,7 +1260,7 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
         }
       }
       subtaskRefs.push({
-        basename: fullSubtaskBasename,
+        basename: existingSubtask ? existingSubtask.basename : fullSubtaskBasename,
         title: subtaskTitle
       });
     }
@@ -1222,49 +1269,9 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
     }
   }
   async linkSubtasksInParent(parentFile, subtaskRefs) {
-    let content = await this.app.vault.read(parentFile);
-    const subtaskIdsYaml = subtaskRefs.map((r) => `  - "[[${r.basename}|${r.title}]]"`).join("\n");
-    const subtaskIdsRegex = /^subtaskIds:\s*(\[\]|.*)$/m;
-    if (subtaskIdsRegex.test(content)) {
-      content = content.replace(subtaskIdsRegex, `subtaskIds:
-${subtaskIdsYaml}`);
-    } else {
-      content = content.replace(/^---\n([\s\S]*?)\n---/m, (match, p1) => {
-        return `---
-${p1}
-subtaskIds:
-${subtaskIdsYaml}
----`;
-      });
+    for (const ref of subtaskRefs) {
+      await this.linkChildToParent(parentFile, ref);
     }
-    const subtasksBeginMarker = "<!-- ODTUCLASS:SUBTASKS:BEGIN -->";
-    const subtasksEndMarker = "<!-- ODTUCLASS:SUBTASKS:END -->";
-    const subtasksChecklist = subtaskRefs.map((r) => {
-      const isChecked = content.includes(`- [x] [[${r.basename}`);
-      return `${isChecked ? "- [x]" : "- [ ]"} [[${r.basename}|${r.title}]]`;
-    }).join("\n");
-    const beginIdx = content.indexOf(subtasksBeginMarker);
-    const endIdx = content.indexOf(subtasksEndMarker);
-    if (beginIdx !== -1 && endIdx !== -1 && endIdx > beginIdx) {
-      content = content.slice(0, beginIdx + subtasksBeginMarker.length) + "\n" + subtasksChecklist + "\n" + content.slice(endIdx);
-    } else {
-      const myNotesHeader = "## My Notes & Workspace";
-      const notesIdx = content.indexOf(myNotesHeader);
-      const subtasksBlock = `
-## Subtasks
-
-${subtasksBeginMarker}
-${subtasksChecklist}
-${subtasksEndMarker}
-
-`;
-      if (notesIdx !== -1) {
-        content = content.slice(0, notesIdx) + subtasksBlock + content.slice(notesIdx);
-      } else {
-        content += subtasksBlock;
-      }
-    }
-    await this.app.vault.modify(parentFile, content);
   }
   mergeSuggestedProblemsContent(existingContent, newProblems, chapter, parentLink, dueDate) {
     let content = existingContent;

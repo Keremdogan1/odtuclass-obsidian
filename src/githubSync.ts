@@ -252,7 +252,14 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 	let failCount = 0;
 	let stateChanged = false;
 
-	for (const item of items) {
+	const sortedItems = [...items].sort((a: any, b: any) => {
+		const aIsSec = typeof a?.name === 'string' && a.name.startsWith('section-') ? 0 : 1;
+		const bIsSec = typeof b?.name === 'string' && b.name.startsWith('section-') ? 0 : 1;
+		if (aIsSec !== bIsSec) return aIsSec - bIsSec;
+		return String(a?.name || '').localeCompare(String(b?.name || ''));
+	});
+
+	for (const item of sortedItems) {
 		if (item.name.endsWith('.json')) {
 			const idStr = item.name.replace('.json', '');
 
