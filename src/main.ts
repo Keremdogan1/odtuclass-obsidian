@@ -233,10 +233,20 @@ export default class ODTUClassPlugin extends Plugin {
 		return null;
 	}
 
+	extractCanonicalCourseCode(text?: string): string {
+		if (!text) return '';
+		const isLab = /\blabs?\b/i.test(text);
+		const m = text.match(/\b([A-Z]{2,4})\s*(\d{3})\b/i);
+		if (!m) return '';
+		const code = `${m[1].toUpperCase()} ${m[2]}`;
+		return isLab ? `${code} LAB` : code;
+	}
+
 	async getOrCreateCourseTask(courseId: string | number, courseName: string): Promise<{ file: TFile; basename: string; title: string }> {
 		const courseIdStr = String(courseId);
+		const targetCourseCode = this.extractCanonicalCourseCode(courseName);
 
-		// 1. Search in outputFolder
+		// 1. Search in outputFolder ONLY for actual course-level tasks (never assignment/section subtasks!)
 		const folder = this.app.vault.getAbstractFileByPath(this.settings.outputFolder);
 		if (folder && folder instanceof TFolder) {
 			for (const child of folder.children) {
@@ -244,9 +254,30 @@ export default class ODTUClassPlugin extends Plugin {
 					const cache = this.app.metadataCache.getFileCache(child);
 					const fm = cache?.frontmatter;
 					if (fm) {
-						if (fm.id === `course:${courseIdStr}` || 
+						const fmId = typeof fm.id === 'string' ? fm.id : '';
+						const isCourseNote =
+							fmId.startsWith('course:') ||
+							(fm['pm-task'] === true &&
+								fm.type === 'task' &&
+								!fm.parentId &&
+								!fmId.startsWith('section:') &&
+								!fmId.startsWith('assignment:') &&
+								!fmId.startsWith('calendar:') &&
+								fm['odtuclass-module-id'] === undefined &&
+								fm['odtuclass-section-id'] === undefined);
+
+						if (!isCourseNote) continue;
+
+						const candCode = this.extractCanonicalCourseCode(
+							String(fm.title || fm['odtuclass-course'] || child.basename),
+						);
+
+						if (
+							fmId === `course:${courseIdStr}` ||
 							String(fm['odtuclass-course-id']) === courseIdStr ||
-							(fm['pm-task'] === true && fm.type === 'task' && fm.title === courseName)) {
+							fm.title === courseName ||
+							(targetCourseCode && candCode === targetCourseCode)
+						) {
 							return {
 								file: child,
 								basename: child.basename,
@@ -262,7 +293,9 @@ export default class ODTUClassPlugin extends Plugin {
 		let cleanCourseName = courseName;
 		const bracketMatch = courseName.match(/^\[(.*?)\]\s*(.*)$/);
 		if (bracketMatch) {
-			const codePart = bracketMatch[1].replace(/\s+All Sections/i, '').trim();
+			const codePart = bracketMatch[1]
+				.replace(/\s+(?:All\s+Sections?|Sections?\s*\d+)/i, '')
+				.trim();
 			const titlePart = bracketMatch[2].trim();
 			cleanCourseName = `${codePart} - ${titlePart}`;
 		}
@@ -440,6 +473,11 @@ odtuclass-course: "${courseName}"
 			weekNum = 2;
 		} else if (/formal\s+definitions.*differentiation/i.test(fullText)) {
 			weekNum = 3;
+		} else {
+			const chMatch = fullText.match(/\bch(?:apter|\.)?\s*0?([1-9]\d*)\b/i);
+			if (chMatch) {
+				weekNum = parseInt(chMatch[1], 10);
+			}
 		}
 
 		// 2. Check due date and open/start date if available
@@ -463,6 +501,7 @@ odtuclass-course: "${courseName}"
 
 		const targetSectionId = assignment.sectionId !== undefined && assignment.sectionId !== null ? String(assignment.sectionId) : '';
 		const targetSectionName = (assignment.sectionName || '').trim().toLowerCase();
+		const targetCourseCode = this.extractCanonicalCourseCode(assignment.courseName || '');
 
 		const candidateSections: { file: TFile; fm: any; basename: string; title: string }[] = [];
 
@@ -472,17 +511,30 @@ odtuclass-course: "${courseName}"
 				const fm = cache?.frontmatter;
 				if (!fm) continue;
 
-				const isSameCourse = String(fm['odtuclass-course-id']) === courseIdStr ||
-					(typeof fm.id === 'string' && (fm.id.startsWith(`section:${courseIdStr}:`) || fm.id.startsWith(`course:${courseIdStr}`)));
+				const fmId = typeof fm.id === 'string' ? fm.id : '';
+				// Never treat course notes, assignments, calendar tasks, or suggested problem subtasks as weekly sections!
+				if (
+					fmId.startsWith('course:') ||
+					fmId.startsWith('assignment:') ||
+					fmId.startsWith('calendar:') ||
+					fmId.includes(':subtask:') ||
+					fm['odtuclass-module-id'] !== undefined
+				) {
+					continue;
+				}
+
+				const candCourseCode = this.extractCanonicalCourseCode(
+					String(fm['odtuclass-course'] || fm.parentId || ''),
+				);
+				const isSameCourse =
+					String(fm['odtuclass-course-id']) === courseIdStr ||
+					fmId.startsWith(`section:${courseIdStr}:`) ||
+					(targetCourseCode !== '' && candCourseCode === targetCourseCode);
 				if (!isSameCourse) continue;
 
-				// Skip the main course note itself
-				if (fm.id === `course:${courseIdStr}`) continue;
-
-				const isSectionNote = (typeof fm.id === 'string' && fm.id.startsWith(`section:`)) ||
-					fm['odtuclass-section-id'] !== undefined ||
-					/\bweek\s*0?\d+\b/i.test(fm.title || child.basename) ||
-					/\bweek-\d+\b/i.test(child.basename);
+				const isSectionNote =
+					fmId.startsWith('section:') ||
+					fm['odtuclass-section-id'] !== undefined;
 
 				if (isSectionNote) {
 					candidateSections.push({
