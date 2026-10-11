@@ -185,6 +185,33 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
       }
     });
     this.addSettingTab(new ODTUClassSettingTab(this.app, this));
+    this.registerEvent(
+      this.app.metadataCache.on("changed", async (file) => {
+        if (file instanceof import_obsidian2.TFile && file.extension === "md") {
+          await this.syncTaskBodyStatusWithFrontmatter(file);
+        }
+      })
+    );
+  }
+  async syncTaskBodyStatusWithFrontmatter(file) {
+    const cache = this.app.metadataCache.getFileCache(file);
+    const fm = cache == null ? void 0 : cache.frontmatter;
+    if (!fm || !fm["pm-task"] || !fm.status)
+      return;
+    const statusStr = String(fm.status).toLowerCase().trim();
+    let expectedDurum = "Yap\u0131lacak";
+    if (statusStr === "done" || statusStr === "completed" || statusStr === "complete") {
+      expectedDurum = "Tamamland\u0131";
+    } else if (statusStr === "in-progress" || statusStr === "doing") {
+      expectedDurum = "Devam Ediyor";
+    }
+    const content = await this.app.vault.read(file);
+    const durumRegex = /^(-\s*\*\*Durum:\*\*\s*)(.*)$/m;
+    const match = content.match(durumRegex);
+    if (match && match[2].trim() !== expectedDurum) {
+      const updated = content.replace(durumRegex, `$1${expectedDurum}`);
+      await this.app.vault.modify(file, updated);
+    }
   }
   onunload() {
   }
@@ -672,6 +699,12 @@ parentId: "${parentLink}"`);
         if (!skipIfExists) {
           let updatedContent = renderedContent;
           const existingContent = await this.app.vault.read(existingFile);
+          const existingStatusMatch = existingContent.match(/^status:\s*["']?([^"'\r\n]+)["']?/m);
+          const existingStatus = existingStatusMatch ? existingStatusMatch[1].trim() : "todo";
+          const finalStatus = existingStatus === "done" || assignment.status === "done" ? "done" : existingStatus;
+          if (finalStatus !== "todo") {
+            updatedContent = updatedContent.replace(/^status:\s*.*$/m, `status: "${finalStatus}"`);
+          }
           const notesHeader = "## Description";
           if (existingContent.includes(notesHeader)) {
             const descIdx = existingContent.indexOf(notesHeader);
@@ -681,11 +714,18 @@ parentId: "${parentLink}"`);
               updatedContent = updatedContent.slice(0, newDescIdx) + userDesc;
             }
           }
+          const expectedDurum = finalStatus === "done" ? "Tamamland\u0131" : finalStatus === "in-progress" ? "Devam Ediyor" : "Yap\u0131lacak";
+          updatedContent = updatedContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1${expectedDurum}`);
           await this.app.vault.modify(existingFile, updatedContent);
         }
       }
     } else {
-      targetFile = await this.app.vault.create(outputPath, renderedContent);
+      let initialContent = renderedContent;
+      if (assignment.status === "done") {
+        initialContent = initialContent.replace(/^status:\s*.*$/m, `status: "done"`);
+        initialContent = initialContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1Tamamland\u0131`);
+      }
+      targetFile = await this.app.vault.create(outputPath, initialContent);
       if (isSection && assignment.suggestedProblems && Array.isArray(assignment.suggestedProblems) && assignment.suggestedProblems.length > 0) {
         await this.processSubtasks(assignment, targetFile, cleanTitle);
       }

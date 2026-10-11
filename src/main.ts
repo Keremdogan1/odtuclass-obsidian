@@ -45,6 +45,36 @@ export default class ODTUClassPlugin extends Plugin {
 		});
 
 		this.addSettingTab(new ODTUClassSettingTab(this.app, this));
+
+		this.registerEvent(
+			this.app.metadataCache.on('changed', async (file) => {
+				if (file instanceof TFile && file.extension === 'md') {
+					await this.syncTaskBodyStatusWithFrontmatter(file);
+				}
+			})
+		);
+	}
+
+	async syncTaskBodyStatusWithFrontmatter(file: TFile) {
+		const cache = this.app.metadataCache.getFileCache(file);
+		const fm = cache?.frontmatter;
+		if (!fm || !fm['pm-task'] || !fm.status) return;
+
+		const statusStr = String(fm.status).toLowerCase().trim();
+		let expectedDurum = 'Yapılacak';
+		if (statusStr === 'done' || statusStr === 'completed' || statusStr === 'complete') {
+			expectedDurum = 'Tamamlandı';
+		} else if (statusStr === 'in-progress' || statusStr === 'doing') {
+			expectedDurum = 'Devam Ediyor';
+		}
+
+		const content = await this.app.vault.read(file);
+		const durumRegex = /^(-\s*\*\*Durum:\*\*\s*)(.*)$/m;
+		const match = content.match(durumRegex);
+		if (match && match[2].trim() !== expectedDurum) {
+			const updated = content.replace(durumRegex, `$1${expectedDurum}`);
+			await this.app.vault.modify(file, updated);
+		}
 	}
 
 	onunload() { }
@@ -621,6 +651,17 @@ odtuclass-course: "${courseName}"
 				if (!skipIfExists) {
 					let updatedContent = renderedContent;
 					const existingContent = await this.app.vault.read(existingFile);
+
+					const existingStatusMatch = existingContent.match(/^status:\s*["']?([^"'\r\n]+)["']?/m);
+					const existingStatus = existingStatusMatch ? existingStatusMatch[1].trim() : 'todo';
+					const finalStatus = (existingStatus === 'done' || assignment.status === 'done')
+						? 'done'
+						: existingStatus;
+
+					if (finalStatus !== 'todo') {
+						updatedContent = updatedContent.replace(/^status:\s*.*$/m, `status: "${finalStatus}"`);
+					}
+
 					const notesHeader = '## Description';
 					if (existingContent.includes(notesHeader)) {
 						const descIdx = existingContent.indexOf(notesHeader);
@@ -630,11 +671,20 @@ odtuclass-course: "${courseName}"
 							updatedContent = updatedContent.slice(0, newDescIdx) + userDesc;
 						}
 					}
+
+					const expectedDurum = finalStatus === 'done' ? 'Tamamlandı' : (finalStatus === 'in-progress' ? 'Devam Ediyor' : 'Yapılacak');
+					updatedContent = updatedContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1${expectedDurum}`);
+
 					await this.app.vault.modify(existingFile, updatedContent);
 				}
 			}
 		} else {
-			targetFile = (await this.app.vault.create(outputPath, renderedContent)) as TFile;
+			let initialContent = renderedContent;
+			if (assignment.status === 'done') {
+				initialContent = initialContent.replace(/^status:\s*.*$/m, `status: "done"`);
+				initialContent = initialContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1Tamamlandı`);
+			}
+			targetFile = (await this.app.vault.create(outputPath, initialContent)) as TFile;
 			if (isSection && assignment.suggestedProblems && Array.isArray(assignment.suggestedProblems) && assignment.suggestedProblems.length > 0) {
 				await this.processSubtasks(assignment, targetFile, cleanTitle);
 			}
