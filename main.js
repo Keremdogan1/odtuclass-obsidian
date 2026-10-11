@@ -27,6 +27,110 @@ var import_obsidian2 = require("obsidian");
 
 // src/githubSync.ts
 var import_obsidian = require("obsidian");
+function formatStandardSlideFilename(slide) {
+  if (slide.formattedFilename && typeof slide.formattedFilename === "string") {
+    return slide.formattedFilename.trim();
+  }
+  const rawName = String(slide.filename || "").trim();
+  const combined = `${rawName} ${slide.title || ""}`;
+  const yearMatch = combined.match(/\b(20\d{2})\b/);
+  const year = yearMatch ? yearMatch[1] : "2026";
+  let weekKey = slide.weekKey ? String(slide.weekKey).toLowerCase().trim() : "";
+  if (!weekKey) {
+    const wkMatch = combined.match(/week\s*[-_]*0*(\d{1,2}[a-d]?)(?![0-9a-z])/i);
+    if (wkMatch) {
+      weekKey = wkMatch[1].toLowerCase();
+    }
+  }
+  if (weekKey) {
+    const isPrelecture = /pre-?lecture/i.test(combined);
+    const suffix = isPrelecture ? " Prelecture" : "";
+    return `${year} Week ${weekKey}${suffix}.pdf`;
+  }
+  return rawName.toLowerCase().endsWith(".pdf") ? rawName : `${rawName}.pdf`;
+}
+var CourseSlidePromptModal = class extends import_obsidian.Modal {
+  constructor(app, plugin, courseCode, courseName, slideCount, defaultFolder) {
+    super(app);
+    this.resolved = false;
+    this.enabled = true;
+    this.plugin = plugin;
+    this.courseCode = courseCode;
+    this.courseName = courseName || courseCode;
+    this.slideCount = slideCount;
+    this.targetFolder = defaultFolder || `Courses/${courseCode}/Slides`;
+  }
+  waitForDecision() {
+    return new Promise((resolve) => {
+      this.resolvePromise = resolve;
+      this.open();
+    });
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", {
+      text: `Yeni Ders Slaytlar\u0131 Tespit Edildi (${this.courseCode})`
+    });
+    contentEl.createEl("p", {
+      text: `"${this.courseName}" dersi i\xE7in ODTUClass \xFCzerinde ${this.slideCount} adet ders slayt\u0131 (PDF) tespit edildi. Bu dersin slaytlar\u0131n\u0131n otomatik olarak indirilece\u011Fi Vault klas\xF6r\xFCn\xFC se\xE7ebilirsiniz:`
+    });
+    new import_obsidian.Setting(contentEl).setName("Slayt Senkronizasyonunu Etkinle\u015Ftir").setDesc("Bu ders i\xE7in yeni y\xFCklenen slaytlar\u0131 otomatik indir").addToggle(
+      (toggle) => toggle.setValue(this.enabled).onChange((val) => {
+        this.enabled = val;
+      })
+    );
+    new import_obsidian.Setting(contentEl).setName("Hedef Slayt Klas\xF6r\xFC").setDesc(`\xD6rn: Courses/${this.courseCode}/Slides`).addText(
+      (text) => text.setPlaceholder(`Courses/${this.courseCode}/Slides`).setValue(this.targetFolder).onChange((val) => {
+        this.targetFolder = val.trim() || `Courses/${this.courseCode}/Slides`;
+      })
+    );
+    new import_obsidian.Setting(contentEl).addButton(
+      (btn) => btn.setButtonText("Bu Ders \u0130\xE7in \u0130ndirme").onClick(async () => {
+        this.enabled = false;
+        await this.saveAndFinish();
+      })
+    ).addButton(
+      (btn) => btn.setButtonText("Kaydet ve Senkronize Et").setCta().onClick(async () => {
+        await this.saveAndFinish();
+      })
+    );
+  }
+  async saveAndFinish() {
+    if (this.resolved)
+      return;
+    this.resolved = true;
+    const config = {
+      courseCode: this.courseCode,
+      courseName: this.courseName,
+      enabled: this.enabled,
+      targetFolder: this.targetFolder,
+      prompted: true
+    };
+    if (!this.plugin.settings.courseSlideConfigs) {
+      this.plugin.settings.courseSlideConfigs = {};
+    }
+    this.plugin.settings.courseSlideConfigs[this.courseCode] = config;
+    await this.plugin.saveSettings();
+    this.resolvePromise(config);
+    this.close();
+  }
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
+    if (!this.resolved) {
+      this.resolved = true;
+      const fallbackConfig = {
+        courseCode: this.courseCode,
+        courseName: this.courseName,
+        enabled: this.enabled,
+        targetFolder: this.targetFolder,
+        prompted: true
+      };
+      this.resolvePromise(fallbackConfig);
+    }
+  }
+};
 async function loadProcessedState(adapter) {
   const path = ".odtuclass/processed.json";
   if (await adapter.exists(path)) {
@@ -159,14 +263,12 @@ async function syncFromGithub(plugin) {
   const slideMsg = slideStats.downloaded > 0 || slideStats.replaced > 0 ? ` | Slides: ${slideStats.downloaded} downloaded, ${slideStats.replaced} replaced` : "";
   new import_obsidian.Notice(`ODTUClass Sync: ${createdCount} updated/created, ${skipCount} skipped, ${failCount} failed${slideMsg}.`);
 }
-async function syncAllCourseSlidesFromGithub(plugin, owner, repo, token) {
+async function fetchSlideManifestFromGithub(owner, repo, token) {
   var _a, _b;
-  const adapter = plugin.app.vault.adapter;
   const manifestUrls = [
     `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/manifest.json`,
     `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/CENG111/manifest.json`
   ];
-  let manifest = null;
   for (const manifestApiUrl of manifestUrls) {
     try {
       const manifestRes = await (0, import_obsidian.requestUrl)({
@@ -189,52 +291,96 @@ async function syncAllCourseSlidesFromGithub(plugin, owner, repo, token) {
           }
         });
         if ((_b = rawManifestRes == null ? void 0 : rawManifestRes.json) == null ? void 0 : _b.slides) {
-          manifest = rawManifestRes.json;
-          break;
+          return rawManifestRes.json;
         }
       }
     } catch (e) {
     }
   }
+  return null;
+}
+async function syncAllCourseSlidesFromGithub(plugin, owner, repo, token) {
+  const adapter = plugin.app.vault.adapter;
+  const manifest = await fetchSlideManifestFromGithub(owner, repo, token);
   if (!manifest || typeof manifest.slides !== "object") {
     return { downloaded: 0, replaced: 0 };
   }
-  let downloaded = 0;
-  let replaced = 0;
+  const byCourse = /* @__PURE__ */ new Map();
   for (const slide of Object.values(manifest.slides)) {
     if (!slide || !slide.filename)
       continue;
     const courseCode = String(slide.courseCode || "CENG111").trim();
-    const filename = String(slide.filename);
-    const weekKey = slide.weekKey ? String(slide.weekKey).toLowerCase() : "";
-    const slidesDir = `Courses/${courseCode}/Slides`;
-    const targetPath = `${slidesDir}/${filename}`;
+    const courseName = String(slide.courseName || courseCode).trim();
+    if (!byCourse.has(courseCode)) {
+      byCourse.set(courseCode, { courseName, slides: [] });
+    }
+    byCourse.get(courseCode).slides.push(slide);
+  }
+  let downloaded = 0;
+  let replaced = 0;
+  if (!plugin.settings.courseSlideConfigs) {
+    plugin.settings.courseSlideConfigs = {};
+  }
+  for (const [courseCode, group] of byCourse.entries()) {
+    let config = plugin.settings.courseSlideConfigs[courseCode];
+    if (!config || !config.prompted) {
+      const modal = new CourseSlidePromptModal(
+        plugin.app,
+        plugin,
+        courseCode,
+        group.courseName,
+        group.slides.length,
+        (config == null ? void 0 : config.targetFolder) || `Courses/${courseCode}/Slides`
+      );
+      config = await modal.waitForDecision();
+    }
+    if (!config.enabled) {
+      continue;
+    }
+    const slidesDir = (config.targetFolder || `Courses/${courseCode}/Slides`).replace(/\/+$/, "");
     if (!await adapter.exists(slidesDir)) {
       await plugin.createFolderRecursive(slidesDir);
     }
-    if (!await adapter.exists(targetPath)) {
-      const fileApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/${encodeURIComponent(courseCode)}/${encodeURIComponent(filename)}`;
-      const pdfRes = await (0, import_obsidian.requestUrl)({
-        url: fileApiUrl,
-        method: "GET",
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "Accept": "application/vnd.github.v3.raw",
-          "User-Agent": "Obsidian-ODTUClass-Plugin"
-        },
-        throw: false
-      });
-      if (pdfRes && pdfRes.status === 200 && pdfRes.arrayBuffer) {
-        await adapter.writeBinary(targetPath, pdfRes.arrayBuffer);
-        downloaded++;
+    for (const slide of group.slides) {
+      const rawFilename = String(slide.filename);
+      const targetFilename = plugin.settings.autoFormatSlideNames !== false ? formatStandardSlideFilename(slide) : rawFilename;
+      const weekKey = slide.weekKey ? String(slide.weekKey).toLowerCase() : "";
+      const targetPath = `${slidesDir}/${targetFilename}`;
+      const legacyRawPath = `${slidesDir}/${rawFilename}`;
+      if (legacyRawPath !== targetPath && await adapter.exists(legacyRawPath) && !await adapter.exists(`${legacyRawPath}.annot.json`)) {
+        if (!await adapter.exists(targetPath)) {
+          const buf = await adapter.readBinary(legacyRawPath);
+          await adapter.writeBinary(targetPath, buf);
+        }
+        await adapter.remove(legacyRawPath);
       }
-    }
-    if (weekKey && await adapter.exists(targetPath)) {
-      const old2024Path = `${slidesDir}/2024 Week ${weekKey}.pdf`;
-      const old2024AnnotPath = `${old2024Path}.annot.json`;
-      if (await adapter.exists(old2024Path) && !await adapter.exists(old2024AnnotPath)) {
-        await adapter.remove(old2024Path);
-        replaced++;
+      if (await adapter.exists(`${targetPath}.annot.json`) || await adapter.exists(`${legacyRawPath}.annot.json`)) {
+        continue;
+      }
+      if (!await adapter.exists(targetPath)) {
+        const fileApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/${encodeURIComponent(courseCode)}/${encodeURIComponent(rawFilename)}`;
+        const pdfRes = await (0, import_obsidian.requestUrl)({
+          url: fileApiUrl,
+          method: "GET",
+          headers: {
+            "Authorization": `Bearer ${token}`,
+            "Accept": "application/vnd.github.v3.raw",
+            "User-Agent": "Obsidian-ODTUClass-Plugin"
+          },
+          throw: false
+        });
+        if (pdfRes && pdfRes.status === 200 && pdfRes.arrayBuffer) {
+          await adapter.writeBinary(targetPath, pdfRes.arrayBuffer);
+          downloaded++;
+        }
+      }
+      if (weekKey && !/pre-?lecture/i.test(targetFilename) && await adapter.exists(targetPath)) {
+        const old2024Path = `${slidesDir}/2024 Week ${weekKey}.pdf`;
+        const old2024AnnotPath = `${old2024Path}.annot.json`;
+        if (old2024Path !== targetPath && await adapter.exists(old2024Path) && !await adapter.exists(old2024AnnotPath)) {
+          await adapter.remove(old2024Path);
+          replaced++;
+        }
       }
     }
   }
@@ -247,7 +393,17 @@ var DEFAULT_SETTINGS = {
   templateFolder: "ODTUClass/Templates",
   githubOwner: "Keremdogan1",
   githubRepo: "odtuclass-sync",
-  githubToken: ""
+  githubToken: "",
+  autoFormatSlideNames: true,
+  courseSlideConfigs: {
+    CENG111: {
+      courseCode: "CENG111",
+      courseName: "[CENG 111 ALL Sections] Introduction to Computer Eng. Concepts",
+      enabled: true,
+      targetFolder: "Courses/CENG111/Slides",
+      prompted: true
+    }
+  }
 };
 var ODTUClassPlugin = class extends import_obsidian2.Plugin {
   async onload() {
@@ -298,7 +454,13 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
   onunload() {
   }
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const loaded = await this.loadData();
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
+    this.settings.courseSlideConfigs = Object.assign(
+      {},
+      DEFAULT_SETTINGS.courseSlideConfigs,
+      (loaded == null ? void 0 : loaded.courseSlideConfigs) || {}
+    );
   }
   async saveSettings() {
     await this.saveData(this.settings);
@@ -1229,6 +1391,84 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
     });
     new import_obsidian2.Setting(containerEl).setName("Sync from GitHub").setDesc("Manually trigger a sync from the configured GitHub repository").addButton((button) => button.setButtonText("Sync ODTUClass").setCta().onClick(() => {
       syncFromGithub(this.plugin);
+    }));
+    containerEl.createEl("h3", { text: "Ders Slaytlar\u0131 (Course Slides Sync)" });
+    new import_obsidian2.Setting(containerEl).setName('Standart slayt dosya isimlendirmesi (\xD6rn: "2026 Week 1a.pdf")').setDesc('A\xE7\u0131k oldu\u011Funda ODTUClass \xFCzerindeki "CENG111-2026--Week1a.pdf" gibi ham isimler "2026 Week 1a.pdf" format\u0131na d\xF6n\xFC\u015Ft\xFCr\xFCl\xFCr.').addToggle((toggle) => toggle.setValue(this.plugin.settings.autoFormatSlideNames !== false).onChange(async (value) => {
+      this.plugin.settings.autoFormatSlideNames = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian2.Setting(containerEl).setName("Slayt\u0131 Bulunan Dersleri GitHub'dan Tara").setDesc("GitHub deponuzdaki slayt manifestosunu kontrol ederek slayt tespit edilen dersleri a\u015Fa\u011F\u0131daki listeye ekler.").addButton((button) => button.setButtonText("Dersleri Alg\u0131la").onClick(async () => {
+      const { githubOwner, githubRepo, githubToken } = this.plugin.settings;
+      if (!githubOwner || !githubRepo || !githubToken) {
+        new import_obsidian2.Notice("L\xFCtfen \xF6nce GitHub ayarlar\u0131n\u0131 doldurun.");
+        return;
+      }
+      const manifest = await fetchSlideManifestFromGithub(githubOwner, githubRepo, githubToken);
+      if (!manifest) {
+        new import_obsidian2.Notice("GitHub \xFCzerinde hen\xFCz slayt manifestosu (.odtuclass/slides/manifest.json) bulunamad\u0131.");
+        return;
+      }
+      const coursesMap = manifest.courses || {};
+      if (manifest.courseCode && Array.isArray(manifest.slides)) {
+        coursesMap[manifest.courseCode] = {
+          courseCode: manifest.courseCode,
+          courseName: manifest.courseName || manifest.courseCode,
+          slides: manifest.slides
+        };
+      }
+      let added = 0;
+      for (const [code, data] of Object.entries(coursesMap)) {
+        if (!this.plugin.settings.courseSlideConfigs[code]) {
+          this.plugin.settings.courseSlideConfigs[code] = {
+            courseCode: code,
+            courseName: data.courseName || code,
+            enabled: true,
+            targetFolder: `Courses/${code}/Slides`,
+            prompted: true
+          };
+          added++;
+        }
+      }
+      await this.plugin.saveSettings();
+      this.display();
+      new import_obsidian2.Notice(added > 0 ? `${added} yeni ders eklendi.` : "T\xFCm slaytl\u0131 dersler zaten listede.");
+    }));
+    const configs = this.plugin.settings.courseSlideConfigs || {};
+    for (const [courseCode, cfg] of Object.entries(configs)) {
+      new import_obsidian2.Setting(containerEl).setName(`${courseCode} Slayt Senkronizasyonu`).setDesc(`${cfg.courseName || courseCode} dersinin slaytlar\u0131 i\xE7in hedef Vault klas\xF6r\xFC`).addToggle((toggle) => toggle.setTooltip("Bu dersin slaytlar\u0131n\u0131 senkronize et").setValue(cfg.enabled).onChange(async (value) => {
+        cfg.enabled = value;
+        cfg.prompted = true;
+        await this.plugin.saveSettings();
+      })).addText((text) => text.setPlaceholder(`Courses/${courseCode}/Slides`).setValue(cfg.targetFolder).onChange(async (value) => {
+        cfg.targetFolder = value.trim().replace(/^\/+|\/+$/g, "") || `Courses/${courseCode}/Slides`;
+        cfg.prompted = true;
+        await this.plugin.saveSettings();
+      })).addExtraButton((btn) => btn.setIcon("trash").setTooltip("Bu dersin slayt ayar\u0131n\u0131 kald\u0131r").onClick(async () => {
+        delete this.plugin.settings.courseSlideConfigs[courseCode];
+        await this.plugin.saveSettings();
+        this.display();
+      }));
+    }
+    let newCourseCode = "";
+    let newCourseFolder = "";
+    new import_obsidian2.Setting(containerEl).setName("Manuel Ders Slayt Klas\xF6r\xFC Ekle").setDesc("Yeni bir ders kodu (\xF6rn: MATH119) ve hedef klas\xF6r (\xF6rn: Courses/MATH119/Slides) ekleyin").addText((text) => text.setPlaceholder("Ders Kodu (\xF6rn: MATH119)").onChange((val) => {
+      newCourseCode = val.trim().toUpperCase().replace(/\s+/g, "");
+    })).addText((text) => text.setPlaceholder("Hedef Klas\xF6r (\xF6rn: Courses/MATH119/Slides)").onChange((val) => {
+      newCourseFolder = val.trim().replace(/^\/+|\/+$/g, "");
+    })).addButton((btn) => btn.setButtonText("Ekle").onClick(async () => {
+      if (!newCourseCode) {
+        new import_obsidian2.Notice("L\xFCtfen bir ders kodu girin.");
+        return;
+      }
+      this.plugin.settings.courseSlideConfigs[newCourseCode] = {
+        courseCode: newCourseCode,
+        courseName: newCourseCode,
+        enabled: true,
+        targetFolder: newCourseFolder || `Courses/${newCourseCode}/Slides`,
+        prompted: true
+      };
+      await this.plugin.saveSettings();
+      this.display();
     }));
   }
 };

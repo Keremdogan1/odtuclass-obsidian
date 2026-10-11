@@ -1,4 +1,4 @@
-import { Notice, requestUrl } from 'obsidian';
+import { App, Modal, Notice, Setting, requestUrl } from 'obsidian';
 
 export interface ProcessedState {
 	[id: string]: {
@@ -8,6 +8,166 @@ export interface ProcessedState {
 		openAt?: string;
 		dueAt?: string;
 	};
+}
+
+export interface CourseSlideConfig {
+	courseCode: string;
+	courseName: string;
+	enabled: boolean;
+	targetFolder: string;
+	prompted?: boolean;
+}
+
+export function formatStandardSlideFilename(slide: {
+	filename: string;
+	formattedFilename?: string | null;
+	weekKey?: string | null;
+	title?: string | null;
+}): string {
+	if (slide.formattedFilename && typeof slide.formattedFilename === 'string') {
+		return slide.formattedFilename.trim();
+	}
+	const rawName = String(slide.filename || '').trim();
+	const combined = `${rawName} ${slide.title || ''}`;
+	const yearMatch = combined.match(/\b(20\d{2})\b/);
+	const year = yearMatch ? yearMatch[1] : '2026';
+
+	let weekKey = slide.weekKey ? String(slide.weekKey).toLowerCase().trim() : '';
+	if (!weekKey) {
+		const wkMatch = combined.match(/week\s*[-_]*0*(\d{1,2}[a-d]?)(?![0-9a-z])/i);
+		if (wkMatch) {
+			weekKey = wkMatch[1].toLowerCase();
+		}
+	}
+
+	if (weekKey) {
+		const isPrelecture = /pre-?lecture/i.test(combined);
+		const suffix = isPrelecture ? ' Prelecture' : '';
+		return `${year} Week ${weekKey}${suffix}.pdf`;
+	}
+
+	return rawName.toLowerCase().endsWith('.pdf') ? rawName : `${rawName}.pdf`;
+}
+
+export class CourseSlidePromptModal extends Modal {
+	private plugin: any;
+	private courseCode: string;
+	private courseName: string;
+	private slideCount: number;
+	private resolvePromise!: (config: CourseSlideConfig) => void;
+	private resolved = false;
+	private enabled = true;
+	private targetFolder: string;
+
+	constructor(
+		app: App,
+		plugin: any,
+		courseCode: string,
+		courseName: string,
+		slideCount: number,
+		defaultFolder?: string
+	) {
+		super(app);
+		this.plugin = plugin;
+		this.courseCode = courseCode;
+		this.courseName = courseName || courseCode;
+		this.slideCount = slideCount;
+		this.targetFolder = defaultFolder || `Courses/${courseCode}/Slides`;
+	}
+
+	waitForDecision(): Promise<CourseSlideConfig> {
+		return new Promise((resolve) => {
+			this.resolvePromise = resolve;
+			this.open();
+		});
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.empty();
+
+		contentEl.createEl('h2', {
+			text: `Yeni Ders Slaytları Tespit Edildi (${this.courseCode})`,
+		});
+
+		contentEl.createEl('p', {
+			text: `"${this.courseName}" dersi için ODTUClass üzerinde ${this.slideCount} adet ders slaytı (PDF) tespit edildi. Bu dersin slaytlarının otomatik olarak indirileceği Vault klasörünü seçebilirsiniz:`,
+		});
+
+		new Setting(contentEl)
+			.setName('Slayt Senkronizasyonunu Etkinleştir')
+			.setDesc('Bu ders için yeni yüklenen slaytları otomatik indir')
+			.addToggle((toggle) =>
+				toggle.setValue(this.enabled).onChange((val) => {
+					this.enabled = val;
+				})
+			);
+
+		new Setting(contentEl)
+			.setName('Hedef Slayt Klasörü')
+			.setDesc(`Örn: Courses/${this.courseCode}/Slides`)
+			.addText((text) =>
+				text
+					.setPlaceholder(`Courses/${this.courseCode}/Slides`)
+					.setValue(this.targetFolder)
+					.onChange((val) => {
+						this.targetFolder = val.trim() || `Courses/${this.courseCode}/Slides`;
+					})
+			);
+
+		new Setting(contentEl)
+			.addButton((btn) =>
+				btn
+					.setButtonText('Bu Ders İçin İndirme')
+					.onClick(async () => {
+						this.enabled = false;
+						await this.saveAndFinish();
+					})
+			)
+			.addButton((btn) =>
+				btn
+					.setButtonText('Kaydet ve Senkronize Et')
+					.setCta()
+					.onClick(async () => {
+						await this.saveAndFinish();
+					})
+			);
+	}
+
+	private async saveAndFinish() {
+		if (this.resolved) return;
+		this.resolved = true;
+		const config: CourseSlideConfig = {
+			courseCode: this.courseCode,
+			courseName: this.courseName,
+			enabled: this.enabled,
+			targetFolder: this.targetFolder,
+			prompted: true,
+		};
+		if (!this.plugin.settings.courseSlideConfigs) {
+			this.plugin.settings.courseSlideConfigs = {};
+		}
+		this.plugin.settings.courseSlideConfigs[this.courseCode] = config;
+		await this.plugin.saveSettings();
+		this.resolvePromise(config);
+		this.close();
+	}
+
+	onClose() {
+		const { contentEl } = this;
+		contentEl.empty();
+		if (!this.resolved) {
+			this.resolved = true;
+			const fallbackConfig: CourseSlideConfig = {
+				courseCode: this.courseCode,
+				courseName: this.courseName,
+				enabled: this.enabled,
+				targetFolder: this.targetFolder,
+				prompted: true,
+			};
+			this.resolvePromise(fallbackConfig);
+		}
+	}
 }
 
 export async function loadProcessedState(adapter: any): Promise<ProcessedState> {
@@ -168,21 +328,16 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 	new Notice(`ODTUClass Sync: ${createdCount} updated/created, ${skipCount} skipped, ${failCount} failed${slideMsg}.`);
 }
 
-export async function syncAllCourseSlidesFromGithub(
-	plugin: any,
+export async function fetchSlideManifestFromGithub(
 	owner: string,
 	repo: string,
 	token: string
-): Promise<{ downloaded: number; replaced: number }> {
-	const adapter = plugin.app.vault.adapter;
-
-	// Try universal .odtuclass/slides/manifest.json first, fallback to .odtuclass/slides/CENG111/manifest.json
+): Promise<any | null> {
 	const manifestUrls = [
 		`https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/manifest.json`,
 		`https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/CENG111/manifest.json`,
 	];
 
-	let manifest: any = null;
 	for (const manifestApiUrl of manifestUrls) {
 		try {
 			const manifestRes = await requestUrl({
@@ -205,59 +360,133 @@ export async function syncAllCourseSlidesFromGithub(
 					}
 				});
 				if (rawManifestRes?.json?.slides) {
-					manifest = rawManifestRes.json;
-					break;
+					return rawManifestRes.json;
 				}
 			}
 		} catch {
 			// continue
 		}
 	}
+	return null;
+}
+
+export async function syncAllCourseSlidesFromGithub(
+	plugin: any,
+	owner: string,
+	repo: string,
+	token: string
+): Promise<{ downloaded: number; replaced: number }> {
+	const adapter = plugin.app.vault.adapter;
+	const manifest = await fetchSlideManifestFromGithub(owner, repo, token);
 
 	if (!manifest || typeof manifest.slides !== 'object') {
 		return { downloaded: 0, replaced: 0 };
 	}
 
-	let downloaded = 0;
-	let replaced = 0;
-
+	// Group slides by courseCode
+	const byCourse = new Map<string, { courseName: string; slides: any[] }>();
 	for (const slide of Object.values(manifest.slides) as any[]) {
 		if (!slide || !slide.filename) continue;
 		const courseCode = String(slide.courseCode || 'CENG111').trim();
-		const filename = String(slide.filename);
-		const weekKey = slide.weekKey ? String(slide.weekKey).toLowerCase() : '';
-		const slidesDir = `Courses/${courseCode}/Slides`;
-		const targetPath = `${slidesDir}/${filename}`;
+		const courseName = String(slide.courseName || courseCode).trim();
+		if (!byCourse.has(courseCode)) {
+			byCourse.set(courseCode, { courseName, slides: [] });
+		}
+		byCourse.get(courseCode)!.slides.push(slide);
+	}
 
+	let downloaded = 0;
+	let replaced = 0;
+
+	if (!plugin.settings.courseSlideConfigs) {
+		plugin.settings.courseSlideConfigs = {};
+	}
+
+	for (const [courseCode, group] of byCourse.entries()) {
+		let config: CourseSlideConfig | undefined = plugin.settings.courseSlideConfigs[courseCode];
+
+		if (!config || !config.prompted) {
+			const modal = new CourseSlidePromptModal(
+				plugin.app,
+				plugin,
+				courseCode,
+				group.courseName,
+				group.slides.length,
+				config?.targetFolder || `Courses/${courseCode}/Slides`
+			);
+			config = await modal.waitForDecision();
+		}
+
+		if (!config.enabled) {
+			continue;
+		}
+
+		const slidesDir = (config.targetFolder || `Courses/${courseCode}/Slides`).replace(/\/+$/, '');
 		if (!(await adapter.exists(slidesDir))) {
 			await plugin.createFolderRecursive(slidesDir);
 		}
 
-		if (!(await adapter.exists(targetPath))) {
-			const fileApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/${encodeURIComponent(courseCode)}/${encodeURIComponent(filename)}`;
-			const pdfRes = await requestUrl({
-				url: fileApiUrl,
-				method: 'GET',
-				headers: {
-					"Authorization": `Bearer ${token}`,
-					"Accept": "application/vnd.github.v3.raw",
-					"User-Agent": "Obsidian-ODTUClass-Plugin"
-				},
-				throw: false
-			});
+		for (const slide of group.slides) {
+			const rawFilename = String(slide.filename);
+			const targetFilename =
+				plugin.settings.autoFormatSlideNames !== false
+					? formatStandardSlideFilename(slide)
+					: rawFilename;
+			const weekKey = slide.weekKey ? String(slide.weekKey).toLowerCase() : '';
+			const targetPath = `${slidesDir}/${targetFilename}`;
+			const legacyRawPath = `${slidesDir}/${rawFilename}`;
 
-			if (pdfRes && pdfRes.status === 200 && pdfRes.arrayBuffer) {
-				await adapter.writeBinary(targetPath, pdfRes.arrayBuffer);
-				downloaded++;
+			// If legacy unformatted file exists (e.g. CENG111-2026--Week1a.pdf) and has no .annot.json, rename it to targetPath ("2026 Week 1a.pdf")
+			if (
+				legacyRawPath !== targetPath &&
+				(await adapter.exists(legacyRawPath)) &&
+				!(await adapter.exists(`${legacyRawPath}.annot.json`))
+			) {
+				if (!(await adapter.exists(targetPath))) {
+					const buf = await adapter.readBinary(legacyRawPath);
+					await adapter.writeBinary(targetPath, buf);
+				}
+				await adapter.remove(legacyRawPath);
 			}
-		}
 
-		if (weekKey && (await adapter.exists(targetPath))) {
-			const old2024Path = `${slidesDir}/2024 Week ${weekKey}.pdf`;
-			const old2024AnnotPath = `${old2024Path}.annot.json`;
-			if ((await adapter.exists(old2024Path)) && !(await adapter.exists(old2024AnnotPath))) {
-				await adapter.remove(old2024Path);
-				replaced++;
+			// Do not overwrite if an annotated version already exists
+			if (
+				(await adapter.exists(`${targetPath}.annot.json`)) ||
+				(await adapter.exists(`${legacyRawPath}.annot.json`))
+			) {
+				continue;
+			}
+
+			if (!(await adapter.exists(targetPath))) {
+				const fileApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/${encodeURIComponent(courseCode)}/${encodeURIComponent(rawFilename)}`;
+				const pdfRes = await requestUrl({
+					url: fileApiUrl,
+					method: 'GET',
+					headers: {
+						"Authorization": `Bearer ${token}`,
+						"Accept": "application/vnd.github.v3.raw",
+						"User-Agent": "Obsidian-ODTUClass-Plugin"
+					},
+					throw: false
+				});
+
+				if (pdfRes && pdfRes.status === 200 && pdfRes.arrayBuffer) {
+					await adapter.writeBinary(targetPath, pdfRes.arrayBuffer);
+					downloaded++;
+				}
+			}
+
+			if (weekKey && !/pre-?lecture/i.test(targetFilename) && (await adapter.exists(targetPath))) {
+				const old2024Path = `${slidesDir}/2024 Week ${weekKey}.pdf`;
+				const old2024AnnotPath = `${old2024Path}.annot.json`;
+				if (
+					old2024Path !== targetPath &&
+					(await adapter.exists(old2024Path)) &&
+					!(await adapter.exists(old2024AnnotPath))
+				) {
+					await adapter.remove(old2024Path);
+					replaced++;
+				}
 			}
 		}
 	}

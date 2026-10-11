@@ -1,5 +1,5 @@
 import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder } from 'obsidian';
-import { syncFromGithub } from './githubSync';
+import { CourseSlideConfig, fetchSlideManifestFromGithub, syncFromGithub } from './githubSync';
 
 interface ODTUClassSettings {
 	outputFolder: string;
@@ -7,6 +7,8 @@ interface ODTUClassSettings {
 	githubOwner: string;
 	githubRepo: string;
 	githubToken: string;
+	autoFormatSlideNames: boolean;
+	courseSlideConfigs: Record<string, CourseSlideConfig>;
 }
 
 const DEFAULT_SETTINGS: ODTUClassSettings = {
@@ -14,7 +16,17 @@ const DEFAULT_SETTINGS: ODTUClassSettings = {
 	templateFolder: 'ODTUClass/Templates',
 	githubOwner: 'Keremdogan1',
 	githubRepo: 'odtuclass-sync',
-	githubToken: ''
+	githubToken: '',
+	autoFormatSlideNames: true,
+	courseSlideConfigs: {
+		CENG111: {
+			courseCode: 'CENG111',
+			courseName: '[CENG 111 ALL Sections] Introduction to Computer Eng. Concepts',
+			enabled: true,
+			targetFolder: 'Courses/CENG111/Slides',
+			prompted: true
+		}
+	}
 }
 
 interface NormalizedDates {
@@ -80,7 +92,13 @@ export default class ODTUClassPlugin extends Plugin {
 	onunload() { }
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const loaded = await this.loadData();
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
+		this.settings.courseSlideConfigs = Object.assign(
+			{},
+			DEFAULT_SETTINGS.courseSlideConfigs,
+			loaded?.courseSlideConfigs || {}
+		);
 	}
 
 	async saveSettings() {
@@ -1193,5 +1211,124 @@ class ODTUClassSettingTab extends PluginSettingTab {
 				.onClick(() => {
 					syncFromGithub(this.plugin);
 				}));
+
+		containerEl.createEl('h3', { text: 'Ders Slaytları (Course Slides Sync)' });
+
+		new Setting(containerEl)
+			.setName('Standart slayt dosya isimlendirmesi (Örn: "2026 Week 1a.pdf")')
+			.setDesc('Açık olduğunda ODTUClass üzerindeki "CENG111-2026--Week1a.pdf" gibi ham isimler "2026 Week 1a.pdf" formatına dönüştürülür.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.autoFormatSlideNames !== false)
+				.onChange(async (value) => {
+					this.plugin.settings.autoFormatSlideNames = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Slaytı Bulunan Dersleri GitHub\'dan Tara')
+			.setDesc('GitHub deponuzdaki slayt manifestosunu kontrol ederek slayt tespit edilen dersleri aşağıdaki listeye ekler.')
+			.addButton(button => button
+				.setButtonText('Dersleri Algıla')
+				.onClick(async () => {
+					const { githubOwner, githubRepo, githubToken } = this.plugin.settings;
+					if (!githubOwner || !githubRepo || !githubToken) {
+						new Notice('Lütfen önce GitHub ayarlarını doldurun.');
+						return;
+					}
+					const manifest = await fetchSlideManifestFromGithub(githubOwner, githubRepo, githubToken);
+					if (!manifest) {
+						new Notice('GitHub üzerinde henüz slayt manifestosu (.odtuclass/slides/manifest.json) bulunamadı.');
+						return;
+					}
+					const coursesMap: Record<string, any> = manifest.courses || {};
+					if (manifest.courseCode && Array.isArray(manifest.slides)) {
+						coursesMap[manifest.courseCode] = {
+							courseCode: manifest.courseCode,
+							courseName: manifest.courseName || manifest.courseCode,
+							slides: manifest.slides
+						};
+					}
+					let added = 0;
+					for (const [code, data] of Object.entries(coursesMap)) {
+						if (!this.plugin.settings.courseSlideConfigs[code]) {
+							this.plugin.settings.courseSlideConfigs[code] = {
+								courseCode: code,
+								courseName: data.courseName || code,
+								enabled: true,
+								targetFolder: `Courses/${code}/Slides`,
+								prompted: true
+							};
+							added++;
+						}
+					}
+					await this.plugin.saveSettings();
+					this.display();
+					new Notice(added > 0 ? `${added} yeni ders eklendi.` : 'Tüm slaytlı dersler zaten listede.');
+				}));
+
+		const configs = this.plugin.settings.courseSlideConfigs || {};
+		for (const [courseCode, cfg] of Object.entries(configs)) {
+			new Setting(containerEl)
+				.setName(`${courseCode} Slayt Senkronizasyonu`)
+				.setDesc(`${cfg.courseName || courseCode} dersinin slaytları için hedef Vault klasörü`)
+				.addToggle(toggle => toggle
+					.setTooltip('Bu dersin slaytlarını senkronize et')
+					.setValue(cfg.enabled)
+					.onChange(async (value) => {
+						cfg.enabled = value;
+						cfg.prompted = true;
+						await this.plugin.saveSettings();
+					}))
+				.addText(text => text
+					.setPlaceholder(`Courses/${courseCode}/Slides`)
+					.setValue(cfg.targetFolder)
+					.onChange(async (value) => {
+						cfg.targetFolder = value.trim().replace(/^\/+|\/+$/g, '') || `Courses/${courseCode}/Slides`;
+						cfg.prompted = true;
+						await this.plugin.saveSettings();
+					}))
+				.addExtraButton(btn => btn
+					.setIcon('trash')
+					.setTooltip('Bu dersin slayt ayarını kaldır')
+					.onClick(async () => {
+						delete this.plugin.settings.courseSlideConfigs[courseCode];
+						await this.plugin.saveSettings();
+						this.display();
+					}));
+		}
+
+		let newCourseCode = '';
+		let newCourseFolder = '';
+		new Setting(containerEl)
+			.setName('Manuel Ders Slayt Klasörü Ekle')
+			.setDesc('Yeni bir ders kodu (örn: MATH119) ve hedef klasör (örn: Courses/MATH119/Slides) ekleyin')
+			.addText(text => text
+				.setPlaceholder('Ders Kodu (örn: MATH119)')
+				.onChange(val => {
+					newCourseCode = val.trim().toUpperCase().replace(/\s+/g, '');
+				}))
+			.addText(text => text
+				.setPlaceholder('Hedef Klasör (örn: Courses/MATH119/Slides)')
+				.onChange(val => {
+					newCourseFolder = val.trim().replace(/^\/+|\/+$/g, '');
+				}))
+			.addButton(btn => btn
+				.setButtonText('Ekle')
+				.onClick(async () => {
+					if (!newCourseCode) {
+						new Notice('Lütfen bir ders kodu girin.');
+						return;
+					}
+					this.plugin.settings.courseSlideConfigs[newCourseCode] = {
+						courseCode: newCourseCode,
+						courseName: newCourseCode,
+						enabled: true,
+						targetFolder: newCourseFolder || `Courses/${newCourseCode}/Slides`,
+						prompted: true
+					};
+					await this.plugin.saveSettings();
+					this.display();
+				}));
 	}
 }
+
