@@ -1027,6 +1027,27 @@ $&`);
           if (/^-\s*\*\*Durum:\*\*\s*.*$/m.test(updatedContent)) {
             updatedContent = updatedContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1${expectedDurum}`);
           }
+          const descText = String(assignment.description || assignment.content || "").trim();
+          if (descText) {
+            const descBegin = "<!-- ODTUCLASS:DESCRIPTION:BEGIN -->";
+            const descEnd = "<!-- ODTUCLASS:DESCRIPTION:END -->";
+            const bIdx = updatedContent.indexOf(descBegin);
+            const eIdx = updatedContent.indexOf(descEnd);
+            if (bIdx !== -1 && eIdx !== -1 && eIdx > bIdx) {
+              updatedContent = updatedContent.slice(0, bIdx + descBegin.length) + `
+${descText}
+` + updatedContent.slice(eIdx);
+            } else if (/^##\s+Description\s*$/m.test(updatedContent)) {
+              updatedContent = updatedContent.replace(
+                /^##\s+Description\s*$/m,
+                `## Description
+
+${descBegin}
+${descText}
+${descEnd}`
+              );
+            }
+          }
           if (updatedContent !== existingContent) {
             await this.app.vault.modify(existingFile, updatedContent);
           }
@@ -1363,6 +1384,7 @@ ${expectedParent}`);
       "weekStart",
       "weekEnd",
       "content",
+      "description",
       "contentHash"
     ];
     let result = template;
@@ -1370,6 +1392,19 @@ ${expectedParent}`);
       const value = data[p] !== null && data[p] !== void 0 ? data[p] : "";
       const regex = new RegExp(`\\{\\{${p}\\}\\}`, "g");
       result = result.replace(regex, String(value));
+    }
+    const descText = String(assignment.description || assignment.content || "").trim();
+    if (assignment.type !== "section" && descText && !template.includes("{{content}}") && !template.includes("{{description}}") && /^##\s+Description\s*$/m.test(result)) {
+      const descBegin = "<!-- ODTUCLASS:DESCRIPTION:BEGIN -->";
+      const descEnd = "<!-- ODTUCLASS:DESCRIPTION:END -->";
+      result = result.replace(
+        /^##\s+Description\s*$/m,
+        `## Description
+
+${descBegin}
+${descText}
+${descEnd}`
+      );
     }
     return result;
   }
