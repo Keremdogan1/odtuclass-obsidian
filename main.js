@@ -357,7 +357,19 @@ async function syncAllCourseSlidesFromGithub(plugin, owner, repo, token) {
       if (await adapter.exists(`${targetPath}.annot.json`) || await adapter.exists(`${legacyRawPath}.annot.json`)) {
         continue;
       }
-      if (!await adapter.exists(targetPath)) {
+      let shouldDownload = !await adapter.exists(targetPath);
+      let isSameNameReplacement = false;
+      if (!shouldDownload && slide.filesize) {
+        try {
+          const stat = await adapter.stat(targetPath);
+          if (stat && typeof stat.size === "number" && stat.size !== Number(slide.filesize)) {
+            shouldDownload = true;
+            isSameNameReplacement = true;
+          }
+        } catch (e) {
+        }
+      }
+      if (shouldDownload) {
         const fileApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/${encodeURIComponent(courseCode)}/${encodeURIComponent(rawFilename)}`;
         const pdfRes = await (0, import_obsidian.requestUrl)({
           url: fileApiUrl,
@@ -372,6 +384,9 @@ async function syncAllCourseSlidesFromGithub(plugin, owner, repo, token) {
         if (pdfRes && pdfRes.status === 200 && pdfRes.arrayBuffer) {
           await adapter.writeBinary(targetPath, pdfRes.arrayBuffer);
           downloaded++;
+          if (isSameNameReplacement) {
+            replaced++;
+          }
         }
       }
       if (weekKey && !/pre-?lecture/i.test(targetFilename) && await adapter.exists(targetPath)) {
@@ -662,7 +677,7 @@ odtuclass-course: "${courseName}"
     let content = await this.app.vault.read(projectFile);
     const courseLink = `[[${courseBasename}|${courseTitle}]]`;
     if (!content.includes(`[[${courseBasename}`)) {
-      const taskIdsRegex = /^taskIds:\s*(\[[\s\S]*?\])/m;
+      const taskIdsRegex = /^taskIds:\s*(\[.*\])$/m;
       const taskIdsMatch = content.match(taskIdsRegex);
       if (taskIdsMatch) {
         try {
@@ -672,10 +687,7 @@ odtuclass-course: "${courseName}"
             content = content.replace(taskIdsRegex, `taskIds: ${JSON.stringify(existingArray)}`);
           }
         } catch (e) {
-          content = content.replace(taskIdsRegex, (match, p1) => {
-            const trimmed = p1.trim().replace(/\]$/, "");
-            return `taskIds: ${trimmed}, "${courseLink}"]`;
-          });
+          console.warn("[ODTUClass] Could not JSON.parse taskIds in project file, skipping inline splice:", e);
         }
       }
       if (!content.includes(`- [ ] [[${courseBasename}`) && !content.includes(`- [x] [[${courseBasename}`)) {

@@ -457,7 +457,19 @@ export async function syncAllCourseSlidesFromGithub(
 				continue;
 			}
 
-			if (!(await adapter.exists(targetPath))) {
+			let shouldDownload = !(await adapter.exists(targetPath));
+			let isSameNameReplacement = false;
+			if (!shouldDownload && slide.filesize) {
+				try {
+					const stat = await adapter.stat(targetPath);
+					if (stat && typeof stat.size === 'number' && stat.size !== Number(slide.filesize)) {
+						shouldDownload = true;
+						isSameNameReplacement = true;
+					}
+				} catch {}
+			}
+
+			if (shouldDownload) {
 				const fileApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/slides/${encodeURIComponent(courseCode)}/${encodeURIComponent(rawFilename)}`;
 				const pdfRes = await requestUrl({
 					url: fileApiUrl,
@@ -473,6 +485,9 @@ export async function syncAllCourseSlidesFromGithub(
 				if (pdfRes && pdfRes.status === 200 && pdfRes.arrayBuffer) {
 					await adapter.writeBinary(targetPath, pdfRes.arrayBuffer);
 					downloaded++;
+					if (isSameNameReplacement) {
+						replaced++;
+					}
 				}
 			}
 

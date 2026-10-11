@@ -321,7 +321,7 @@ odtuclass-course: "${courseName}"
 		const courseLink = `[[${courseBasename}|${courseTitle}]]`;
 
 		if (!content.includes(`[[${courseBasename}`)) {
-			const taskIdsRegex = /^taskIds:\s*(\[[\s\S]*?\])/m;
+			const taskIdsRegex = /^taskIds:\s*(\[.*\])$/m;
 			const taskIdsMatch = content.match(taskIdsRegex);
 			if (taskIdsMatch) {
 				try {
@@ -331,10 +331,7 @@ odtuclass-course: "${courseName}"
 						content = content.replace(taskIdsRegex, `taskIds: ${JSON.stringify(existingArray)}`);
 					}
 				} catch (e) {
-					content = content.replace(taskIdsRegex, (match, p1) => {
-						const trimmed = p1.trim().replace(/\]$/, '');
-						return `taskIds: ${trimmed}, "${courseLink}"]`;
-					});
+					console.warn('[ODTUClass] Could not JSON.parse taskIds in project file, skipping inline splice:', e);
 				}
 			}
 
