@@ -697,9 +697,8 @@ odtuclass-course: "${courseName}"
 		}
 
 		// Priority 4: Match by open/start/creation date within section weekStart / weekEnd
-		// (or if openIso is before the earliest weekStart of the semester, assign to Week 1)
+		let earliestSection: { file: TFile; basename: string; title: string; startStr: string } | null = null;
 		if (openIso) {
-			let earliestSection: { file: TFile; basename: string; title: string; startStr: string } | null = null;
 			for (const cand of candidateSections) {
 				if (cand.fm.weekStart && cand.fm.weekEnd) {
 					const startStr = String(cand.fm.weekStart).slice(0, 10);
@@ -711,9 +710,6 @@ odtuclass-course: "${courseName}"
 						earliestSection = { file: cand.file, basename: cand.basename, title: cand.title, startStr };
 					}
 				}
-			}
-			if (earliestSection && openIso < earliestSection.startStr) {
-				return { file: earliestSection.file, basename: earliestSection.basename, title: earliestSection.title };
 			}
 		}
 
@@ -730,6 +726,11 @@ odtuclass-course: "${courseName}"
 			}
 		}
 
+		// Priority 6: If openIso was before the semester started (and dueIso is semester-wide), assign to Week 1
+		if (openIso && earliestSection && openIso < earliestSection.startStr) {
+			return { file: earliestSection.file, basename: earliestSection.basename, title: earliestSection.title };
+		}
+
 		return null;
 	}
 
@@ -737,7 +738,28 @@ odtuclass-course: "${courseName}"
 		return this.findParentSectionTask(courseId, cleanTitle, assignment);
 	}
 
+	isNonTaskPayload(assignment: any): boolean {
+		if (!assignment || assignment.type === 'section') return false;
+		if (assignment.isTask === false || assignment.notificationCategory === 'announcement') return true;
+		const modType = String(assignment.moduleType || '').toLowerCase();
+		const title = String(assignment.title || '');
+		if (modType === 'attendance' || /\b(?:attend[ae]nce|yoklama|roll[\s-]*call)\b/i.test(title)) {
+			return true;
+		}
+		if (
+			/\b(?:solved[\s_-]*problems?|answer[\s_-]*key|syllabus|course[\s_-]*outline|section[\s_-]*transfer|course[\s_-]*conflict|helproom|help\s+room)\b/i.test(
+				title,
+			)
+		) {
+			return true;
+		}
+		return false;
+	}
+
 	async processAssignment(assignment: any, skipIfExists: boolean = false) {
+		if (this.isNonTaskPayload(assignment)) {
+			return;
+		}
 		const courseTask = await this.getOrCreateCourseTask(assignment.courseId, assignment.courseName);
 
 		const isSection = assignment.type === 'section';

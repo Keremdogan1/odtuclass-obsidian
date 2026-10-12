@@ -998,8 +998,8 @@ ${fmText}
         }
       }
     }
+    let earliestSection = null;
     if (openIso) {
-      let earliestSection = null;
       for (const cand of candidateSections) {
         if (cand.fm.weekStart && cand.fm.weekEnd) {
           const startStr = String(cand.fm.weekStart).slice(0, 10);
@@ -1011,9 +1011,6 @@ ${fmText}
             earliestSection = { file: cand.file, basename: cand.basename, title: cand.title, startStr };
           }
         }
-      }
-      if (earliestSection && openIso < earliestSection.startStr) {
-        return { file: earliestSection.file, basename: earliestSection.basename, title: earliestSection.title };
       }
     }
     if (dueIso) {
@@ -1027,12 +1024,35 @@ ${fmText}
         }
       }
     }
+    if (openIso && earliestSection && openIso < earliestSection.startStr) {
+      return { file: earliestSection.file, basename: earliestSection.basename, title: earliestSection.title };
+    }
     return null;
   }
   async findWeeklySectionTask(courseId, cleanTitle, assignment) {
     return this.findParentSectionTask(courseId, cleanTitle, assignment);
   }
+  isNonTaskPayload(assignment) {
+    if (!assignment || assignment.type === "section")
+      return false;
+    if (assignment.isTask === false || assignment.notificationCategory === "announcement")
+      return true;
+    const modType = String(assignment.moduleType || "").toLowerCase();
+    const title = String(assignment.title || "");
+    if (modType === "attendance" || /\b(?:attend[ae]nce|yoklama|roll[\s-]*call)\b/i.test(title)) {
+      return true;
+    }
+    if (/\b(?:solved[\s_-]*problems?|answer[\s_-]*key|syllabus|course[\s_-]*outline|section[\s_-]*transfer|course[\s_-]*conflict|helproom|help\s+room)\b/i.test(
+      title
+    )) {
+      return true;
+    }
+    return false;
+  }
   async processAssignment(assignment, skipIfExists = false) {
+    if (this.isNonTaskPayload(assignment)) {
+      return;
+    }
     const courseTask = await this.getOrCreateCourseTask(assignment.courseId, assignment.courseName);
     const isSection = assignment.type === "section";
     const cleanTitle = this.cleanItemTitle(assignment.title, assignment.courseName, isSection, assignment);
