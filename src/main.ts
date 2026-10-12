@@ -1,30 +1,55 @@
-import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder } from 'obsidian';
+import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder } from 'obsidian';
 import {
 	CourseSlideConfig,
+	RemoteSyncConfig,
 	SyncHistoryEntry,
 	SyncHistoryItem,
+	fetchRemoteConfigFromGithub,
 	fetchSlideManifestFromGithub,
 	loadProcessedState,
+	saveRemoteConfigToGithub,
 	syncFromGithub
 } from './githubSync';
+import { PluginLanguage, TaskFormatMode, getDefaultTemplateContent, t } from './i18n';
 
 interface ODTUClassSettings {
+	language: PluginLanguage;
+	taskFormat: TaskFormatMode;
 	outputFolder: string;
 	templateFolder: string;
 	githubOwner: string;
 	githubRepo: string;
 	githubToken: string;
+	academicYear: string;
+	semester: string;
+	ntfyFilter: Record<string, boolean>;
 	autoFormatSlideNames: boolean;
 	courseSlideConfigs: Record<string, CourseSlideConfig>;
 	syncHistory: SyncHistoryEntry[];
 }
 
+const DEFAULT_NTFY_FILTER: Record<string, boolean> = {
+	assignment: true,
+	quiz: true,
+	recitation: true,
+	lab: true,
+	section: true,
+	announcement: true,
+	survey: false,
+	attendance: false
+};
+
 const DEFAULT_SETTINGS: ODTUClassSettings = {
+	language: 'tr',
+	taskFormat: 'dotpm',
 	outputFolder: 'Projects/OdtüClass Tasks/_tasks',
 	templateFolder: 'ODTUClass/Templates',
 	githubOwner: 'Keremdogan1',
 	githubRepo: 'odtuclass-sync',
 	githubToken: '',
+	academicYear: 'auto',
+	semester: 'auto',
+	ntfyFilter: { ...DEFAULT_NTFY_FILTER },
 	autoFormatSlideNames: true,
 	courseSlideConfigs: {
 		CENG111: {
@@ -66,6 +91,14 @@ export default class ODTUClassPlugin extends Plugin {
 			}
 		});
 
+		this.addCommand({
+			id: 'open-setup-wizard',
+			name: 'Open Setup Wizard / Kurulum Sihirbazı',
+			callback: () => {
+				new SetupWizardModal(this.app, this).open();
+			}
+		});
+
 		this.settingTab = new ODTUClassSettingTab(this.app, this);
 		this.addSettingTab(this.settingTab);
 
@@ -78,23 +111,65 @@ export default class ODTUClassPlugin extends Plugin {
 		);
 	}
 
+	async ensureDefaultTemplates(overwrite: boolean = false): Promise<number> {
+		const folderPath = (this.settings.templateFolder || 'ODTUClass/Templates').replace(/\/+$/, '');
+		if (!this.app.vault.getAbstractFileByPath(folderPath)) {
+			await this.createFolderRecursive(folderPath);
+		}
+		const templateNames: Array<'Assignment' | 'Quiz' | 'Interactive' | 'Section' | 'Subtask'> = [
+			'Assignment',
+			'Quiz',
+			'Interactive',
+			'Section',
+			'Subtask'
+		];
+		let written = 0;
+		for (const name of templateNames) {
+			const filePath = `${folderPath}/${name}.md`;
+			const existing = this.app.vault.getAbstractFileByPath(filePath);
+			const content = getDefaultTemplateContent(
+				name,
+				this.settings.language || 'tr',
+				this.settings.taskFormat || 'dotpm'
+			);
+			if (!existing) {
+				await this.app.vault.create(filePath, content);
+				written++;
+			} else if (overwrite && existing instanceof TFile) {
+				await this.app.vault.modify(existing, content);
+				written++;
+			}
+		}
+		return written;
+	}
+
 	async syncTaskBodyStatusWithFrontmatter(file: TFile) {
 		const cache = this.app.metadataCache.getFileCache(file);
 		const fm = cache?.frontmatter;
-		if (!fm || !fm['pm-task'] || !fm.status) return;
-
-		const statusStr = String(fm.status).toLowerCase().trim();
-		let expectedDurum = 'Yapılacak';
-		if (statusStr === 'done' || statusStr === 'completed' || statusStr === 'complete') {
-			expectedDurum = 'Tamamlandı';
-		} else if (statusStr === 'in-progress' || statusStr === 'doing') {
-			expectedDurum = 'Devam Ediyor';
+		if (!fm || !fm.status) return;
+		if (!fm['pm-task'] && !fm['odtuclass-course-id'] && !(Array.isArray(fm.tags) && fm.tags.includes('odtuclass'))) {
+			return;
 		}
 
+		const statusStr = String(fm.status).toLowerCase().trim();
+		const isEn = this.settings.language === 'en';
+
 		const content = await this.app.vault.read(file);
-		const durumRegex = /^(-\s*\*\*Durum:\*\*\s*)(.*)$/m;
+		const durumRegex = /^(-\s*\*\*(Durum|Status):\*\*\s*)(.*)$/m;
 		const match = content.match(durumRegex);
-		if (match && match[2].trim() !== expectedDurum) {
+		if (!match) return;
+
+		const labelInFile = match[2];
+		const useEnForFile = labelInFile.toLowerCase() === 'status' || isEn;
+
+		let expectedDurum = useEnForFile ? 'To Do' : 'Yapılacak';
+		if (statusStr === 'done' || statusStr === 'completed' || statusStr === 'complete') {
+			expectedDurum = useEnForFile ? 'Completed' : 'Tamamlandı';
+		} else if (statusStr === 'in-progress' || statusStr === 'doing') {
+			expectedDurum = useEnForFile ? 'In Progress' : 'Devam Ediyor';
+		}
+
+		if (match[3].trim() !== expectedDurum) {
 			const updated = content.replace(durumRegex, `$1${expectedDurum}`);
 			await this.app.vault.modify(file, updated);
 		}
@@ -109,6 +184,11 @@ export default class ODTUClassPlugin extends Plugin {
 			{},
 			DEFAULT_SETTINGS.courseSlideConfigs,
 			loaded?.courseSlideConfigs || {}
+		);
+		this.settings.ntfyFilter = Object.assign(
+			{},
+			DEFAULT_NTFY_FILTER,
+			loaded?.ntfyFilter || {}
 		);
 		if (!Array.isArray(this.settings.syncHistory)) {
 			this.settings.syncHistory = [];
@@ -1045,15 +1125,27 @@ odtuclass-course: "${courseName}"
 			: this.getTemplateNameForModuleType(assignment.moduleType);
 		const templatePath = `${this.settings.templateFolder}/${templateName}.md`;
 		
-		const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
-
+		let templateFile = this.app.vault.getAbstractFileByPath(templatePath);
 		if (!templateFile || !(templateFile instanceof TFile)) {
-			console.warn(`Template ${templatePath} not found for assignment ${assignment.id}.`);
-			new Notice(`Template not found: ${templateName}.md`);
-			throw new Error("TemplateNotFound");
+			try {
+				await this.ensureDefaultTemplates(false);
+				templateFile = this.app.vault.getAbstractFileByPath(templatePath);
+			} catch (e) {
+				console.warn('Could not auto-create template folder:', e);
+			}
 		}
 
-		const templateContent = await this.app.vault.read(templateFile);
+		let templateContent: string;
+		if (templateFile && templateFile instanceof TFile) {
+			templateContent = await this.app.vault.read(templateFile);
+		} else {
+			templateContent = getDefaultTemplateContent(
+				templateName as any,
+				this.settings.language || 'tr',
+				this.settings.taskFormat || 'dotpm'
+			);
+		}
+
 		const renderedContent = this.renderTemplate(templateContent, assignment, {
 			parentFileName: parentTask.basename,
 			parentTitle: parentTask.title,
@@ -1210,22 +1302,29 @@ odtuclass-course: "${courseName}"
 							updatedContent = updatedContent.replace(/^opened:\s*.*$/m, `opened: "${open.date}"`);
 						}
 						const openDisplay = `${open.date}${open.time ? ` ${open.time}` : ''}`;
-						if (/^-\s*\*\*(?:Açılış|Başlangıç):\*\*\s*.*$/m.test(updatedContent)) {
-							updatedContent = updatedContent.replace(/^-\s*\*\*(Açılış|Başlangıç):\*\*\s*.*$/m, `- **$1:** ${openDisplay}`);
-						} else if (/^-\s*\*\*Teslim:\*\*\s*.*$/m.test(updatedContent)) {
-							updatedContent = updatedContent.replace(/^-\s*\*\*Teslim:\*\*\s*.*$/m, `- **Başlangıç:** ${openDisplay}\n$&`);
+						if (/^-\s*\*\*(?:Açılış|Başlangıç|Opened):\*\*\s*.*$/m.test(updatedContent)) {
+							updatedContent = updatedContent.replace(/^-\s*\*\*(Açılış|Başlangıç|Opened):\*\*\s*.*$/m, `- **$1:** ${openDisplay}`);
+						} else if (/^-\s*\*\*(?:Teslim|Due):\*\*\s*.*$/m.test(updatedContent)) {
+							const openLbl = this.settings.language === 'en' ? 'Opened' : 'Başlangıç';
+							updatedContent = updatedContent.replace(/^-\s*\*\*(?:Teslim|Due):\*\*\s*.*$/m, `- **${openLbl}:** ${openDisplay}\n$&`);
 						}
 					}
 
 					if (due.date) {
 						updatedContent = updatedContent.replace(/^due:\s*.*$/m, `due: "${due.date}"`);
 						const dueDisplay = `${due.date}${due.time ? ` ${due.time}` : ''}`;
-						updatedContent = updatedContent.replace(/^(-\s*\*\*Teslim:\*\*\s*).*$/m, `$1${dueDisplay}`);
+						updatedContent = updatedContent.replace(/^(-\s*\*\*(?:Teslim|Due):\*\*\s*).*$/m, `$1${dueDisplay}`);
 					}
 
-					const expectedDurum = finalStatus === 'done' ? 'Tamamlandı' : (finalStatus === 'in-progress' ? 'Devam Ediyor' : 'Yapılacak');
-					if (/^-\s*\*\*Durum:\*\*\s*.*$/m.test(updatedContent)) {
-						updatedContent = updatedContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1${expectedDurum}`);
+					const isEnFile = /^-\s*\*\*Status:\*\*/m.test(updatedContent) || this.settings.language === 'en';
+					const expectedDurum =
+						finalStatus === 'done'
+							? (isEnFile ? 'Completed' : 'Tamamlandı')
+							: finalStatus === 'in-progress'
+								? (isEnFile ? 'In Progress' : 'Devam Ediyor')
+								: (isEnFile ? 'To Do' : 'Yapılacak');
+					if (/^-\s*\*\*(?:Durum|Status):\*\*\s*.*$/m.test(updatedContent)) {
+						updatedContent = updatedContent.replace(/^(-\s*\*\*(?:Durum|Status):\*\*\s*).*$/m, `$1${expectedDurum}`);
 					}
 
 					const descText = String(assignment.description || assignment.content || '').trim();
@@ -1259,12 +1358,19 @@ odtuclass-course: "${courseName}"
 			if (open.date && !/^start:\s*.*$/m.test(initialContent)) {
 				initialContent = initialContent.replace(/^due:\s*.*$/m, `start: "${open.date}"\n$&`);
 			}
+			const isEnFile = /^-\s*\*\*Status:\*\*/m.test(initialContent) || this.settings.language === 'en';
 			if (assignment.status === 'done') {
 				initialContent = initialContent.replace(/^status:\s*.*$/m, `status: "done"`);
-				initialContent = initialContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1Tamamlandı`);
+				initialContent = initialContent.replace(
+					/^(-\s*\*\*(?:Durum|Status):\*\*\s*).*$/m,
+					`$1${isEnFile ? 'Completed' : 'Tamamlandı'}`
+				);
 			} else if (assignment.status === 'in-progress') {
 				initialContent = initialContent.replace(/^status:\s*.*$/m, `status: "in-progress"`);
-				initialContent = initialContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1Devam Ediyor`);
+				initialContent = initialContent.replace(
+					/^(-\s*\*\*(?:Durum|Status):\*\*\s*).*$/m,
+					`$1${isEnFile ? 'In Progress' : 'Devam Ediyor'}`
+				);
 			}
 			targetFile = (await this.app.vault.create(outputPath, initialContent)) as TFile;
 			action = 'created';
@@ -1746,6 +1852,135 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
 	}
 }
 
+class SetupWizardModal extends Modal {
+	plugin: ODTUClassPlugin;
+
+	constructor(app: App, plugin: ODTUClassPlugin) {
+		super(app);
+		this.plugin = plugin;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.empty();
+		const lang = this.plugin.settings.language || 'tr';
+		const isEn = lang === 'en';
+
+		contentEl.createEl('h2', {
+			text: isEn ? '🚀 ODTUClass Sync Setup Wizard' : '🚀 ODTUClass Kurulum Sihirbazı'
+		});
+		contentEl.createEl('p', {
+			text: isEn
+				? 'Configure your language, task mode, and GitHub connection in one place.'
+				: 'Dil tercihinizi, görev formatınızı ve GitHub bağlantınızı tek adımda yapılandırın.'
+		});
+
+		new Setting(contentEl)
+			.setName(t(lang, 'languageName'))
+			.addDropdown((dd) =>
+				dd
+					.addOption('tr', 'Türkçe')
+					.addOption('en', 'English')
+					.setValue(this.plugin.settings.language || 'tr')
+					.onChange(async (val) => {
+						this.plugin.settings.language = (val === 'en' ? 'en' : 'tr');
+						await this.plugin.saveSettings();
+						this.onOpen();
+					})
+			);
+
+		new Setting(contentEl)
+			.setName(t(lang, 'taskFormatName'))
+			.setDesc(t(lang, 'taskFormatDesc'))
+			.addDropdown((dd) =>
+				dd
+					.addOption('dotpm', t(lang, 'taskFormatDotpm'))
+					.addOption('standard', t(lang, 'taskFormatStandard'))
+					.setValue(this.plugin.settings.taskFormat || 'dotpm')
+					.onChange(async (val) => {
+						this.plugin.settings.taskFormat = val === 'standard' ? 'standard' : 'dotpm';
+						if (val === 'standard' && this.plugin.settings.outputFolder === 'Projects/OdtüClass Tasks/_tasks') {
+							this.plugin.settings.outputFolder = 'ODTUClass/Tasks';
+						}
+						await this.plugin.saveSettings();
+						this.onOpen();
+					})
+			);
+
+		new Setting(contentEl)
+			.setName(t(lang, 'outputFolderName'))
+			.addText((text) =>
+				text
+					.setValue(this.plugin.settings.outputFolder)
+					.onChange(async (val) => {
+						this.plugin.settings.outputFolder = val.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(contentEl)
+			.setName(t(lang, 'githubOwnerName'))
+			.addText((text) =>
+				text
+					.setPlaceholder('github-username')
+					.setValue(this.plugin.settings.githubOwner)
+					.onChange(async (val) => {
+						this.plugin.settings.githubOwner = val.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(contentEl)
+			.setName(t(lang, 'githubRepoName'))
+			.addText((text) =>
+				text
+					.setPlaceholder('odtuclass-sync')
+					.setValue(this.plugin.settings.githubRepo)
+					.onChange(async (val) => {
+						this.plugin.settings.githubRepo = val.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(contentEl)
+			.setName(t(lang, 'githubTokenName'))
+			.addText((text) => {
+				text.inputEl.type = 'password';
+				text
+					.setPlaceholder('github_pat_...')
+					.setValue(this.plugin.settings.githubToken)
+					.onChange(async (val) => {
+						this.plugin.settings.githubToken = val.trim();
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(contentEl)
+			.addButton((btn) =>
+				btn
+					.setButtonText(
+						isEn
+							? 'Create Templates & Finish Setup'
+							: 'Şablonları Oluştur ve Kurulumu Tamamla'
+					)
+					.setCta()
+					.onClick(async () => {
+						await this.plugin.ensureDefaultTemplates(false);
+						await this.plugin.saveSettings();
+						if (this.plugin.settingTab) {
+							this.plugin.settingTab.display();
+						}
+						new Notice(t(lang, 'templatesCreatedNotice'));
+						this.close();
+					})
+			);
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
 class ODTUClassSettingTab extends PluginSettingTab {
 	plugin: ODTUClassPlugin;
 
@@ -1755,14 +1990,56 @@ class ODTUClassSettingTab extends PluginSettingTab {
 	}
 
 	display(): void {
-		const {containerEl} = this;
+		const { containerEl } = this;
+		const lang = this.plugin.settings.language || 'tr';
+		const isEn = lang === 'en';
 
 		containerEl.empty();
-		containerEl.createEl('h2', {text: 'ODTUClass Sync Settings'});
+		containerEl.createEl('h2', { text: t(lang, 'settingsTitle') });
 
 		new Setting(containerEl)
-			.setName('Output folder')
-			.setDesc('Folder where new assignments will be created (e.g. Projects/OdtüClass Tasks/_tasks)')
+			.setName(t(lang, 'setupWizardBtnName'))
+			.setDesc(t(lang, 'setupWizardBtnDesc'))
+			.addButton((btn) =>
+				btn
+					.setButtonText(t(lang, 'setupWizardBtnText'))
+					.onClick(() => {
+						new SetupWizardModal(this.app, this.plugin).open();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(t(lang, 'languageName'))
+			.setDesc(t(lang, 'languageDesc'))
+			.addDropdown((dd) =>
+				dd
+					.addOption('tr', 'Türkçe (TR)')
+					.addOption('en', 'English (EN)')
+					.setValue(this.plugin.settings.language || 'tr')
+					.onChange(async (value) => {
+						this.plugin.settings.language = value === 'en' ? 'en' : 'tr';
+						await this.plugin.saveSettings();
+						this.display();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(t(lang, 'taskFormatName'))
+			.setDesc(t(lang, 'taskFormatDesc'))
+			.addDropdown((dd) =>
+				dd
+					.addOption('dotpm', t(lang, 'taskFormatDotpm'))
+					.addOption('standard', t(lang, 'taskFormatStandard'))
+					.setValue(this.plugin.settings.taskFormat || 'dotpm')
+					.onChange(async (value) => {
+						this.plugin.settings.taskFormat = value === 'standard' ? 'standard' : 'dotpm';
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(t(lang, 'outputFolderName'))
+			.setDesc(t(lang, 'outputFolderDesc'))
 			.addText(text => text
 				.setPlaceholder('Projects/OdtüClass Tasks/_tasks')
 				.setValue(this.plugin.settings.outputFolder)
@@ -1772,21 +2049,27 @@ class ODTUClassSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Template folder')
-			.setDesc('Folder where templates are stored (e.g. ODTUClass/Templates)')
+			.setName(t(lang, 'templateFolderName'))
+			.setDesc(t(lang, 'templateFolderDesc'))
 			.addText(text => text
 				.setPlaceholder('ODTUClass/Templates')
 				.setValue(this.plugin.settings.templateFolder)
 				.onChange(async (value) => {
 					this.plugin.settings.templateFolder = value;
 					await this.plugin.saveSettings();
+				}))
+			.addButton(btn => btn
+				.setButtonText(t(lang, 'repairTemplatesBtn'))
+				.onClick(async () => {
+					await this.plugin.ensureDefaultTemplates(false);
+					new Notice(t(lang, 'templatesCreatedNotice'));
 				}));
 
-		containerEl.createEl('h3', {text: 'GitHub Sync'});
+		containerEl.createEl('h3', { text: t(lang, 'githubHeader') });
 
 		new Setting(containerEl)
-			.setName('GitHub Owner')
-			.setDesc('GitHub username or organization (e.g. Keremdogan1)')
+			.setName(t(lang, 'githubOwnerName'))
+			.setDesc(t(lang, 'githubOwnerDesc'))
 			.addText(text => text
 				.setPlaceholder('Keremdogan1')
 				.setValue(this.plugin.settings.githubOwner)
@@ -1796,8 +2079,8 @@ class ODTUClassSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('GitHub Repository')
-			.setDesc('GitHub repository name (e.g. odtuclass-sync)')
+			.setName(t(lang, 'githubRepoName'))
+			.setDesc(t(lang, 'githubRepoDesc'))
 			.addText(text => text
 				.setPlaceholder('odtuclass-sync')
 				.setValue(this.plugin.settings.githubRepo)
@@ -1807,8 +2090,8 @@ class ODTUClassSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('GitHub Token (Fine-grained PAT)')
-			.setDesc('Token with Contents: Read-only access to the sync repository')
+			.setName(t(lang, 'githubTokenName'))
+			.setDesc(t(lang, 'githubTokenDesc'))
 			.addText(text => {
 				text.inputEl.type = 'password';
 				text
@@ -1821,20 +2104,130 @@ class ODTUClassSettingTab extends PluginSettingTab {
 			});
 
 		new Setting(containerEl)
-			.setName('Sync from GitHub')
-			.setDesc('Manually trigger a sync from the configured GitHub repository')
+			.setName(t(lang, 'syncNowName'))
+			.setDesc(t(lang, 'syncNowDesc'))
 			.addButton(button => button
-				.setButtonText('Sync ODTUClass')
+				.setButtonText(t(lang, 'syncNowBtn'))
 				.setCta()
 				.onClick(() => {
 					syncFromGithub(this.plugin);
 				}));
 
-		containerEl.createEl('h3', { text: 'Ders Slaytları (Course Slides Sync)' });
+		// =========================================================================
+		// Bildirim & Akademik Dönem Filtreleri (ntfy & Sync Config)
+		// =========================================================================
+		containerEl.createEl('h3', { text: t(lang, 'ntfyHeader') });
 
 		new Setting(containerEl)
-			.setName('Standart slayt dosya isimlendirmesi (Örn: "2026 Week 1a.pdf")')
-			.setDesc('Açık olduğunda ODTUClass üzerindeki "CENG111-2026--Week1a.pdf" gibi ham isimler "2026 Week 1a.pdf" formatına dönüştürülür.')
+			.setName(isEn ? 'Remote Bot Configuration (.odtuclass/config.json)' : 'Uzaktan Bot Yapılandırması (.odtuclass/config.json)')
+			.setDesc(t(lang, 'ntfyDesc'))
+			.addButton(btn => btn
+				.setButtonText(t(lang, 'ntfyLoadBtn'))
+				.onClick(async () => {
+					const { githubOwner, githubRepo, githubToken } = this.plugin.settings;
+					if (!githubOwner || !githubRepo || !githubToken) {
+						new Notice(isEn ? 'Please fill in GitHub settings first.' : 'Lütfen önce GitHub ayarlarını doldurun.');
+						return;
+					}
+					const remote = await fetchRemoteConfigFromGithub(githubOwner, githubRepo, githubToken);
+					if (remote && remote.config) {
+						if (remote.config.ntfyFilter) {
+							this.plugin.settings.ntfyFilter = Object.assign(
+								{},
+								DEFAULT_NTFY_FILTER,
+								remote.config.ntfyFilter
+							);
+						}
+						if (remote.config.academicYear) {
+							this.plugin.settings.academicYear = String(remote.config.academicYear);
+						}
+						if (remote.config.semester) {
+							this.plugin.settings.semester = String(remote.config.semester);
+						}
+						await this.plugin.saveSettings();
+						this.display();
+						new Notice(isEn ? 'Loaded filters from GitHub!' : 'Filtreler GitHub üzerinden yüklendi!');
+					} else {
+						new Notice(isEn ? 'No remote config.json found yet.' : 'GitHub üzerinde henüz config.json bulunamadı.');
+					}
+				}))
+			.addButton(btn => btn
+				.setButtonText(t(lang, 'ntfySaveBtn'))
+				.setCta()
+				.onClick(async () => {
+					await this.plugin.saveSettings();
+					const { githubOwner, githubRepo, githubToken, language, academicYear, semester, ntfyFilter } = this.plugin.settings;
+					const ok = await saveRemoteConfigToGithub(githubOwner, githubRepo, githubToken, {
+						language: language || 'tr',
+						academicYear: academicYear || 'auto',
+						semester: semester || 'auto',
+						ntfyFilter: ntfyFilter || DEFAULT_NTFY_FILTER
+					});
+					new Notice(ok ? t(lang, 'ntfySavedNotice') : t(lang, 'ntfySaveErrorNotice'));
+				}));
+
+		new Setting(containerEl)
+			.setName(t(lang, 'termSettingName'))
+			.setDesc(t(lang, 'termSettingDesc'))
+			.addDropdown(dd => dd
+				.addOption('auto', t(lang, 'termAuto'))
+				.addOption('2025:f', '2025-2026 Fall (Güz)')
+				.addOption('2026:s', '2025-2026 Spring (Bahar)')
+				.addOption('2026:u', '2026 Summer (Yaz)')
+				.addOption('2026:f', '2026-2027 Fall (Güz)')
+				.addOption('2027:s', '2026-2027 Spring (Bahar)')
+				.addOption('2027:u', '2027 Summer (Yaz)')
+				.setValue(
+					this.plugin.settings.academicYear && this.plugin.settings.academicYear !== 'auto'
+						? `${this.plugin.settings.academicYear}:${this.plugin.settings.semester || 'f'}`
+						: 'auto'
+				)
+				.onChange(async (val) => {
+					if (val === 'auto') {
+						this.plugin.settings.academicYear = 'auto';
+						this.plugin.settings.semester = 'auto';
+					} else {
+						const [y, s] = val.split(':');
+						this.plugin.settings.academicYear = y;
+						this.plugin.settings.semester = s;
+					}
+					await this.plugin.saveSettings();
+				}));
+
+		const filterKeys: Array<{ key: string; labelKey: keyof typeof import('./i18n').TRANSLATIONS['tr'] }> = [
+			{ key: 'assignment', labelKey: 'cat_assignment' },
+			{ key: 'quiz', labelKey: 'cat_quiz' },
+			{ key: 'recitation', labelKey: 'cat_recitation' },
+			{ key: 'lab', labelKey: 'cat_lab' },
+			{ key: 'section', labelKey: 'cat_section' },
+			{ key: 'announcement', labelKey: 'cat_announcement' },
+			{ key: 'survey', labelKey: 'cat_survey' },
+			{ key: 'attendance', labelKey: 'cat_attendance' }
+		];
+
+		if (!this.plugin.settings.ntfyFilter) {
+			this.plugin.settings.ntfyFilter = { ...DEFAULT_NTFY_FILTER };
+		}
+
+		for (const item of filterKeys) {
+			new Setting(containerEl)
+				.setName(t(lang, item.labelKey))
+				.addToggle(toggle => toggle
+					.setValue(Boolean(this.plugin.settings.ntfyFilter[item.key]))
+					.onChange(async (val) => {
+						this.plugin.settings.ntfyFilter[item.key] = val;
+						await this.plugin.saveSettings();
+					}));
+		}
+
+		// =========================================================================
+		// Ders Slaytları (Course Slides Sync)
+		// =========================================================================
+		containerEl.createEl('h3', { text: t(lang, 'slidesHeader') });
+
+		new Setting(containerEl)
+			.setName(t(lang, 'autoFormatSlidesName'))
+			.setDesc(t(lang, 'autoFormatSlidesDesc'))
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.autoFormatSlideNames !== false)
 				.onChange(async (value) => {
@@ -1843,19 +2236,19 @@ class ODTUClassSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Slaytı Bulunan Dersleri GitHub\'dan Tara')
-			.setDesc('GitHub deponuzdaki slayt manifestosunu kontrol ederek slayt tespit edilen dersleri aşağıdaki listeye ekler.')
+			.setName(t(lang, 'scanSlidesName'))
+			.setDesc(t(lang, 'scanSlidesDesc'))
 			.addButton(button => button
-				.setButtonText('Dersleri Algıla')
+				.setButtonText(t(lang, 'scanSlidesBtn'))
 				.onClick(async () => {
 					const { githubOwner, githubRepo, githubToken } = this.plugin.settings;
 					if (!githubOwner || !githubRepo || !githubToken) {
-						new Notice('Lütfen önce GitHub ayarlarını doldurun.');
+						new Notice(isEn ? 'Please fill in GitHub settings first.' : 'Lütfen önce GitHub ayarlarını doldurun.');
 						return;
 					}
 					const manifest = await fetchSlideManifestFromGithub(githubOwner, githubRepo, githubToken);
 					if (!manifest) {
-						new Notice('GitHub üzerinde henüz slayt manifestosu (.odtuclass/slides/manifest.json) bulunamadı.');
+						new Notice(isEn ? 'No slide manifest found on GitHub yet.' : 'GitHub üzerinde henüz slayt manifestosu (.odtuclass/slides/manifest.json) bulunamadı.');
 						return;
 					}
 					const coursesMap: Record<string, { courseCode: string; courseName: string }> = {};
@@ -1894,16 +2287,20 @@ class ODTUClassSettingTab extends PluginSettingTab {
 					}
 					await this.plugin.saveSettings();
 					this.display();
-					new Notice(added > 0 ? `${added} yeni ders eklendi.` : `Tüm slaytlı dersler (${Object.keys(coursesMap).join(', ') || 'yok'}) zaten listede.`);
+					new Notice(
+						added > 0
+							? (isEn ? `Added ${added} new course(s).` : `${added} yeni ders eklendi.`)
+							: (isEn ? `All courses with slides (${Object.keys(coursesMap).join(', ') || 'none'}) are already listed.` : `Tüm slaytlı dersler (${Object.keys(coursesMap).join(', ') || 'yok'}) zaten listede.`)
+					);
 				}));
 
 		const configs = this.plugin.settings.courseSlideConfigs || {};
 		for (const [courseCode, cfg] of Object.entries(configs)) {
 			new Setting(containerEl)
-				.setName(`${courseCode} Slayt Senkronizasyonu`)
-				.setDesc(`${cfg.courseName || courseCode} dersinin slaytları için hedef Vault klasörü`)
+				.setName(`${courseCode} ${isEn ? 'Slide Sync' : 'Slayt Senkronizasyonu'}`)
+				.setDesc(`${cfg.courseName || courseCode}`)
 				.addToggle(toggle => toggle
-					.setTooltip('Bu dersin slaytlarını senkronize et')
+					.setTooltip(isEn ? 'Sync slides for this course' : 'Bu dersin slaytlarını senkronize et')
 					.setValue(cfg.enabled)
 					.onChange(async (value) => {
 						cfg.enabled = value;
@@ -1920,7 +2317,7 @@ class ODTUClassSettingTab extends PluginSettingTab {
 					}))
 				.addExtraButton(btn => btn
 					.setIcon('trash')
-					.setTooltip('Bu dersin slayt ayarını kaldır')
+					.setTooltip(isEn ? 'Remove course slide config' : 'Bu dersin slayt ayarını kaldır')
 					.onClick(async () => {
 						delete this.plugin.settings.courseSlideConfigs[courseCode];
 						await this.plugin.saveSettings();
@@ -1931,23 +2328,23 @@ class ODTUClassSettingTab extends PluginSettingTab {
 		let newCourseCode = '';
 		let newCourseFolder = '';
 		new Setting(containerEl)
-			.setName('Manuel Ders Slayt Klasörü Ekle')
-			.setDesc('Yeni bir ders kodu (örn: MATH119) ve hedef klasör (örn: Courses/MATH119/Slides) ekleyin')
+			.setName(t(lang, 'addSlideCourseName'))
+			.setDesc(t(lang, 'addSlideCourseDesc'))
 			.addText(text => text
-				.setPlaceholder('Ders Kodu (örn: MATH119)')
+				.setPlaceholder(isEn ? 'Course Code (e.g. MATH119)' : 'Ders Kodu (örn: MATH119)')
 				.onChange(val => {
 					newCourseCode = val.trim().toUpperCase().replace(/\s+/g, '');
 				}))
 			.addText(text => text
-				.setPlaceholder('Hedef Klasör (örn: Courses/MATH119/Slides)')
+				.setPlaceholder(isEn ? 'Target Folder (e.g. Courses/MATH119/Slides)' : 'Hedef Klasör (örn: Courses/MATH119/Slides)')
 				.onChange(val => {
 					newCourseFolder = val.trim().replace(/^\/+|\/+$/g, '');
 				}))
 			.addButton(btn => btn
-				.setButtonText('Ekle')
+				.setButtonText(t(lang, 'addBtn'))
 				.onClick(async () => {
 					if (!newCourseCode) {
-						new Notice('Lütfen bir ders kodu girin.');
+						new Notice(isEn ? 'Please enter a course code.' : 'Lütfen bir ders kodu girin.');
 						return;
 					}
 					this.plugin.settings.courseSlideConfigs[newCourseCode] = {
@@ -1964,27 +2361,30 @@ class ODTUClassSettingTab extends PluginSettingTab {
 		// =========================================================================
 		// Senkronizasyon Geçmişi (Sync History)
 		// =========================================================================
-		containerEl.createEl('h3', { text: '🕒 Senkronizasyon Geçmişi (Sync History)' });
+		containerEl.createEl('h3', { text: t(lang, 'historyHeader') });
 
 		new Setting(containerEl)
-			.setName('Çekme ve Görev Geçmişi')
-			.setDesc('Her senkronizasyonda hangi ders/hafta altına hangi ödevlerin, alt görevlerin veya slaytların eklendiğini gösterir.')
+			.setName(t(lang, 'historySettingName'))
+			.setDesc(t(lang, 'historySettingDesc'))
 			.addButton(btn => btn
-				.setButtonText('Vault\'tan Geçmişi Yenile')
-				.setTooltip('processed.json ve mevcut görev dosyalarından geçmiş kayıtları yeniden oluşturur')
+				.setButtonText(t(lang, 'historyRebuildBtn'))
 				.onClick(async () => {
 					const count = await this.plugin.seedSyncHistoryFromVault(true);
 					this.display();
-					new Notice(`Senkronizasyon geçmişi yenilendi (${count} geçmiş oturum bulundu).`);
+					new Notice(
+						isEn
+							? `Sync history rebuilt (${count} past sessions found).`
+							: `Senkronizasyon geçmişi yenilendi (${count} geçmiş oturum bulundu).`
+					);
 				}))
 			.addButton(btn => btn
-				.setButtonText('Geçmişi Temizle')
+				.setButtonText(t(lang, 'historyClearBtn'))
 				.setWarning()
 				.onClick(async () => {
 					this.plugin.settings.syncHistory = [];
 					await this.plugin.saveSettings();
 					this.display();
-					new Notice('Senkronizasyon geçmişi temizlendi.');
+					new Notice(isEn ? 'Sync history cleared.' : 'Senkronizasyon geçmişi temizlendi.');
 				}));
 
 		const historyContainer = containerEl.createDiv({ cls: 'odtuclass-sync-history-container' });
@@ -2004,7 +2404,7 @@ class ODTUClassSettingTab extends PluginSettingTab {
 				emptyEl.style.background = 'var(--background-secondary)';
 				emptyEl.style.color = 'var(--text-muted)';
 				emptyEl.style.fontSize = '0.9em';
-				emptyEl.setText('Henüz kaydedilmiş bir senkronizasyon geçmişi yok. "Sync ODTUClass" veya "Vault\'tan Geçmişi Yenile" butonuna tıklayabilirsiniz.');
+				emptyEl.setText(t(lang, 'historyEmpty'));
 				return;
 			}
 
@@ -2032,7 +2432,7 @@ class ODTUClassSettingTab extends PluginSettingTab {
 				try {
 					const d = new Date(entry.timestamp);
 					if (!Number.isNaN(d.getTime())) {
-						formattedDate = new Intl.DateTimeFormat('tr-TR', {
+						formattedDate = new Intl.DateTimeFormat(isEn ? 'en-GB' : 'tr-TR', {
 							timeZone: 'Europe/Istanbul',
 							day: '2-digit',
 							month: 'short',
@@ -2047,8 +2447,8 @@ class ODTUClassSettingTab extends PluginSettingTab {
 					entry.source === 'github'
 						? 'GitHub Sync'
 						: entry.source === 'local'
-							? 'Yerel Sync'
-							: 'Önceki Sync Kaydı';
+							? (isEn ? 'Local Sync' : 'Yerel Sync')
+							: (isEn ? 'Past Sync Snapshot' : 'Önceki Sync Kaydı');
 				leftTitle.setText(`📅 ${formattedDate} — ${sourceLabel}`);
 
 				const badgesWrap = summaryEl.createSpan();
@@ -2078,29 +2478,55 @@ class ODTUClassSettingTab extends PluginSettingTab {
 				};
 
 				if (st.created > 0) {
-					makeBadge(`+${st.created} eklendi`, 'rgba(46, 160, 67, 0.2)', 'var(--text-success, #3fb950)');
+					makeBadge(
+						isEn ? `+${st.created} added` : `+${st.created} eklendi`,
+						'rgba(46, 160, 67, 0.2)',
+						'var(--text-success, #3fb950)'
+					);
 				}
 				if (st.updated > 0) {
-					makeBadge(`↻ ${st.updated} güncellendi`, 'rgba(56, 139, 253, 0.2)', 'var(--text-accent)');
+					makeBadge(
+						isEn ? `↻ ${st.updated} updated` : `↻ ${st.updated} güncellendi`,
+						'rgba(56, 139, 253, 0.2)',
+						'var(--text-accent)'
+					);
 				}
 				if (st.moved > 0) {
-					makeBadge(`↪ ${st.moved} taşındı`, 'rgba(210, 153, 34, 0.2)', 'var(--text-warning, #d29922)');
+					makeBadge(
+						isEn ? `↪ ${st.moved} moved` : `↪ ${st.moved} taşındı`,
+						'rgba(210, 153, 34, 0.2)',
+						'var(--text-warning, #d29922)'
+					);
 				}
 				if ((st.slidesDownloaded || 0) + (st.slidesReplaced || 0) > 0) {
 					makeBadge(
-						`📊 ${(st.slidesDownloaded || 0) + (st.slidesReplaced || 0)} slayt`,
+						isEn
+							? `📊 ${(st.slidesDownloaded || 0) + (st.slidesReplaced || 0)} slides`
+							: `📊 ${(st.slidesDownloaded || 0) + (st.slidesReplaced || 0)} slayt`,
 						'rgba(163, 113, 247, 0.2)',
 						'var(--text-accent)'
 					);
 				}
 				if (st.filtered > 0) {
-					makeBadge(`🛡️ ${st.filtered} filtrelendi`, 'var(--background-modifier-hover)', 'var(--text-muted)');
+					makeBadge(
+						isEn ? `🛡️ ${st.filtered} filtered` : `🛡️ ${st.filtered} filtrelendi`,
+						'var(--background-modifier-hover)',
+						'var(--text-muted)'
+					);
 				}
 				if (st.skipped > 0 && entry.items.length === 0) {
-					makeBadge(`⏭️ ${st.skipped} değişiklik yok`, 'var(--background-modifier-hover)', 'var(--text-muted)');
+					makeBadge(
+						isEn ? `⏭️ ${st.skipped} unchanged` : `⏭️ ${st.skipped} değişiklik yok`,
+						'var(--background-modifier-hover)',
+						'var(--text-muted)'
+					);
 				}
 				if (st.failed > 0) {
-					makeBadge(`⚠️ ${st.failed} hata`, 'rgba(248, 81, 73, 0.2)', 'var(--text-error)');
+					makeBadge(
+						isEn ? `⚠️ ${st.failed} failed` : `⚠️ ${st.failed} hata`,
+						'rgba(248, 81, 73, 0.2)',
+						'var(--text-error)'
+					);
 				}
 
 				const bodyEl = detailsEl.createDiv();
@@ -2116,7 +2542,9 @@ class ODTUClassSettingTab extends PluginSettingTab {
 					noChangeEl.style.color = 'var(--text-muted)';
 					noChangeEl.style.fontSize = '0.88em';
 					noChangeEl.setText(
-						`Bu çekmede yeni veya güncellenen bir ödev/slayt bulunmadı (${st.skipped || 0} mevcut öğe kontrol edildi).`
+						isEn
+							? `No new or updated assignments/slides in this sync (${st.skipped || 0} existing items checked).`
+							: `Bu çekmede yeni veya güncellenen bir ödev/slayt bulunmadı (${st.skipped || 0} mevcut öğe kontrol edildi).`
 					);
 				} else {
 					for (const item of entry.items) {
@@ -2159,11 +2587,14 @@ class ODTUClassSettingTab extends PluginSettingTab {
 								ev.preventDefault();
 								const target = this.app.vault.getAbstractFileByPath(item.filePath!);
 								if (target && target instanceof TFile) {
-									// Close settings modal and open the file
 									(this.app as any).setting?.close?.();
 									await this.app.workspace.getLeaf(false).openFile(target);
 								} else {
-									new Notice(`Dosya bulunamadı (taşınmış veya silinmiş olabilir): ${item.filePath}`);
+									new Notice(
+										isEn
+											? `File not found (may have been moved or deleted): ${item.filePath}`
+											: `Dosya bulunamadı (taşınmış veya silinmiş olabilir): ${item.filePath}`
+									);
 								}
 							});
 						} else {
@@ -2189,7 +2620,7 @@ class ODTUClassSettingTab extends PluginSettingTab {
 		};
 
 		if (!this.plugin.settings.syncHistory || this.plugin.settings.syncHistory.length === 0) {
-			this.plugin.seedSyncHistoryFromVault(false).then((seeded) => {
+			this.plugin.seedSyncHistoryFromVault(false).then(() => {
 				renderHistoryList();
 			});
 		} else {

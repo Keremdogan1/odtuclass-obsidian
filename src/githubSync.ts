@@ -659,3 +659,93 @@ export async function syncAllCourseSlidesFromGithub(
 
 	return { downloaded, replaced, items };
 }
+
+export interface RemoteSyncConfig {
+	language?: 'tr' | 'en';
+	academicYear?: string | number;
+	semester?: string;
+	ntfyFilter: Record<string, boolean>;
+}
+
+export async function fetchRemoteConfigFromGithub(
+	owner: string,
+	repo: string,
+	token: string
+): Promise<{ config: RemoteSyncConfig; sha?: string } | null> {
+	if (!owner || !repo || !token) return null;
+	const url = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/config.json`;
+	try {
+		const res = await requestUrl({
+			url,
+			method: 'GET',
+			headers: {
+				"Authorization": `Bearer ${token}`,
+				"Accept": "application/vnd.github.v3+json",
+				"User-Agent": "Obsidian-ODTUClass-Plugin"
+			},
+			throw: false
+		});
+		if (res && res.status === 200 && res.json) {
+			const sha = res.json.sha;
+			if (res.json.download_url) {
+				const rawRes = await requestUrl({
+					url: res.json.download_url,
+					method: 'GET',
+					headers: {
+						"Authorization": `Bearer ${token}`,
+						"User-Agent": "Obsidian-ODTUClass-Plugin"
+					},
+					throw: false
+				});
+				if (rawRes && rawRes.status === 200 && rawRes.json) {
+					return { config: rawRes.json, sha };
+				}
+			}
+		}
+	} catch (e) {
+		console.warn('[ODTUClass] Could not fetch remote .odtuclass/config.json:', e);
+	}
+	return null;
+}
+
+export async function saveRemoteConfigToGithub(
+	owner: string,
+	repo: string,
+	token: string,
+	configData: RemoteSyncConfig
+): Promise<boolean> {
+	if (!owner || !repo || !token) return false;
+	const url = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/config.json`;
+	try {
+		const existing = await fetchRemoteConfigFromGithub(owner, repo, token);
+		const jsonString = JSON.stringify(configData, null, 2) + '\n';
+		const encodedContent = window.btoa(unescape(encodeURIComponent(jsonString)));
+
+		const body: Record<string, any> = {
+			message: 'Update .odtuclass/config.json from Obsidian plugin settings',
+			content: encodedContent
+		};
+		if (existing?.sha) {
+			body.sha = existing.sha;
+		}
+
+		const putRes = await requestUrl({
+			url,
+			method: 'PUT',
+			headers: {
+				"Authorization": `Bearer ${token}`,
+				"Accept": "application/vnd.github.v3+json",
+				"Content-Type": "application/json",
+				"User-Agent": "Obsidian-ODTUClass-Plugin"
+			},
+			body: JSON.stringify(body),
+			throw: false
+		});
+
+		return Boolean(putRes && (putRes.status === 200 || putRes.status === 201));
+	} catch (e) {
+		console.warn('[ODTUClass] Could not save remote .odtuclass/config.json:', e);
+		return false;
+	}
+}
+

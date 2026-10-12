@@ -521,14 +521,408 @@ async function syncAllCourseSlidesFromGithub(plugin, owner, repo, token) {
   }
   return { downloaded, replaced, items };
 }
+async function fetchRemoteConfigFromGithub(owner, repo, token) {
+  if (!owner || !repo || !token)
+    return null;
+  const url = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/config.json`;
+  try {
+    const res = await (0, import_obsidian.requestUrl)({
+      url,
+      method: "GET",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "Obsidian-ODTUClass-Plugin"
+      },
+      throw: false
+    });
+    if (res && res.status === 200 && res.json) {
+      const sha = res.json.sha;
+      if (res.json.download_url) {
+        const rawRes = await (0, import_obsidian.requestUrl)({
+          url: res.json.download_url,
+          method: "GET",
+          headers: {
+            "Authorization": `Bearer ${token}`,
+            "User-Agent": "Obsidian-ODTUClass-Plugin"
+          },
+          throw: false
+        });
+        if (rawRes && rawRes.status === 200 && rawRes.json) {
+          return { config: rawRes.json, sha };
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[ODTUClass] Could not fetch remote .odtuclass/config.json:", e);
+  }
+  return null;
+}
+async function saveRemoteConfigToGithub(owner, repo, token, configData) {
+  if (!owner || !repo || !token)
+    return false;
+  const url = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/config.json`;
+  try {
+    const existing = await fetchRemoteConfigFromGithub(owner, repo, token);
+    const jsonString = JSON.stringify(configData, null, 2) + "\n";
+    const encodedContent = window.btoa(unescape(encodeURIComponent(jsonString)));
+    const body = {
+      message: "Update .odtuclass/config.json from Obsidian plugin settings",
+      content: encodedContent
+    };
+    if (existing == null ? void 0 : existing.sha) {
+      body.sha = existing.sha;
+    }
+    const putRes = await (0, import_obsidian.requestUrl)({
+      url,
+      method: "PUT",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+        "User-Agent": "Obsidian-ODTUClass-Plugin"
+      },
+      body: JSON.stringify(body),
+      throw: false
+    });
+    return Boolean(putRes && (putRes.status === 200 || putRes.status === 201));
+  } catch (e) {
+    console.warn("[ODTUClass] Could not save remote .odtuclass/config.json:", e);
+    return false;
+  }
+}
+
+// src/i18n.ts
+var TRANSLATIONS = {
+  tr: {
+    settingsTitle: "ODTUClass Senkronizasyon Ayarlar\u0131",
+    languageName: "Aray\xFCz ve \u015Eablon Dili (Language)",
+    languageDesc: "Eklenti aray\xFCz\xFCn\xFCn, bildirimlerin ve olu\u015Fturulan g\xF6rev durumlar\u0131n\u0131n dili",
+    taskFormatName: "G\xF6rev Format\u0131 Modu (Task Format)",
+    taskFormatDesc: "DotPM eklentisiyle tam uyumlu mod veya standart Obsidian Markdown/Tasks modu",
+    taskFormatDotpm: "DotPM Modu (Proje & Alt G\xF6rev Hiyerar\u015Fisi)",
+    taskFormatStandard: "Standart Obsidian Modu (Markdown & Tasks)",
+    setupWizardBtnName: "H\u0131zl\u0131 Kurulum Sihirbaz\u0131",
+    setupWizardBtnDesc: "Yeni kullan\u0131c\u0131lar i\xE7in ad\u0131m ad\u0131m GitHub, klas\xF6r, dil ve \u015Fablon yap\u0131land\u0131rma ekran\u0131",
+    setupWizardBtnText: "Kurulum Sihirbaz\u0131n\u0131 A\xE7",
+    outputFolderName: "G\xF6rev \xC7\u0131kt\u0131 Klas\xF6r\xFC (Output Folder)",
+    outputFolderDesc: "Yeni \xF6dev ve haftal\u0131k g\xF6revlerin olu\u015Fturulaca\u011F\u0131 Vault klas\xF6r\xFC (\xF6rn: Projects/Odt\xFCClass Tasks/_tasks)",
+    templateFolderName: "\u015Eablon Klas\xF6r\xFC (Template Folder)",
+    templateFolderDesc: "G\xF6rev \u015Fablonlar\u0131n\u0131n bulundu\u011Fu klas\xF6r (eksikse otomatik olu\u015Fturulur)",
+    repairTemplatesBtn: "\u015Eablonlar\u0131 Olu\u015Ftur / Onar",
+    templatesCreatedNotice: "Varsay\u0131lan ODTUClass \u015Fablonlar\u0131 kontrol edildi ve olu\u015Fturuldu.",
+    githubHeader: "GitHub Senkronizasyonu",
+    githubOwnerName: "GitHub Kullan\u0131c\u0131 Ad\u0131 (Owner)",
+    githubOwnerDesc: "odtuclass-sync deponuzun ba\u011Fl\u0131 oldu\u011Fu GitHub hesab\u0131",
+    githubRepoName: "GitHub Depo Ad\u0131 (Repository)",
+    githubRepoDesc: "Senkronizasyon verilerinin tutuldu\u011Fu depo ad\u0131 (\xF6rn: odtuclass-sync)",
+    githubTokenName: "GitHub Token (Fine-grained PAT)",
+    githubTokenDesc: "Deponuza okuma (ve filtre kayd\u0131 i\xE7in yazma) izni olan eri\u015Fim anahtar\u0131",
+    syncNowName: "GitHub'dan \u015Eimdi Senkronize Et",
+    syncNowDesc: "Yap\u0131land\u0131r\uB41C GitHub deposundan \xF6devleri, b\xF6l\xFCmleri ve slaytlar\u0131 hemen \xE7eker",
+    syncNowBtn: "Sync ODTUClass",
+    ntfyHeader: "\u{1F514} Bildirim & Akademik D\xF6nem Filtreleri (ntfy / Bot)",
+    ntfyDesc: "Hangi ODT\xDCClass etkinliklerinin telefonunuza (ntfy) bildirim olarak gelece\u011Fini se\xE7in. (G\xF6rev d\u0131\u015F\u0131 duyurular ve yoklamalar hi\xE7bir zaman DotPM g\xF6revlerinize kar\u0131\u015Fmaz.)",
+    ntfyLoadBtn: "GitHub'dan Filtreleri Y\xFCkle",
+    ntfySaveBtn: "Filtreleri GitHub'a Kaydet",
+    ntfySavedNotice: "Bildirim ve d\xF6nem ayarlar\u0131 GitHub (.odtuclass/config.json) \xFCzerine kaydedildi!",
+    ntfySaveErrorNotice: "GitHub \xFCzerine kaydedilemedi (Token yazma izni veya ba\u011Flant\u0131 kontrol edin). Ayarlar yerel olarak sakland\u0131.",
+    termSettingName: "Akademik D\xF6nem Alg\u0131lama",
+    termSettingDesc: "Otomatik modda bulundu\u011Funuz aya g\xF6re G\xFCz (Fall), Bahar (Spring) veya Yaz (Summer) d\xF6nemi otomatik se\xE7ilir",
+    termAuto: "Otomatik Alg\u0131la (\xD6nerilen)",
+    cat_assignment: "\xD6devler (Assignments, Pearson, Turnitin, VPL)",
+    cat_quiz: "Quiz ve S\u0131navlar (Quizzes)",
+    cat_recitation: "Recitation ve \xC7al\u0131\u015Fma Sorular\u0131 (PDF / Worksheet)",
+    cat_lab: "Laboratuvar G\xF6revleri ve F\xF6yleri (Labs)",
+    cat_section: "Haftal\u0131k Ders \u0130\xE7eri\u011Fi G\xFCncellemeleri (Sections)",
+    cat_announcement: "Ders Duyurular\u0131 ve Takvim Etkinlikleri (Forum & Calendar)",
+    cat_survey: "Anket ve Se\xE7im Formlar\u0131 (Choice / Feedback)",
+    cat_attendance: "Yoklama Bildirimleri (Attendance)",
+    slidesHeader: "\u{1F4CA} Ders Slaytlar\u0131 (Course Slides Sync)",
+    autoFormatSlidesName: 'Standart slayt dosya isimlendirmesi (\xD6rn: "2026 Week 1a.pdf")',
+    autoFormatSlidesDesc: 'A\xE7\u0131k oldu\u011Funda ODTUClass \xFCzerindeki "CENG111-2026--Week1a.pdf" gibi ham isimler "2026 Week 1a.pdf" format\u0131na d\xF6n\xFC\u015Ft\xFCr\xFCl\xFCr.',
+    scanSlidesName: "Slayt\u0131 Bulunan Dersleri GitHub'dan Tara",
+    scanSlidesDesc: "GitHub deponuzdaki slayt manifestosunu kontrol ederek slayt tespit edilen dersleri a\u015Fa\u011F\u0131daki listeye ekler.",
+    scanSlidesBtn: "Dersleri Alg\u0131la",
+    addSlideCourseName: "Manuel Ders Slayt Klas\xF6r\xFC Ekle",
+    addSlideCourseDesc: "Yeni bir ders kodu (\xF6rn: MATH119) ve hedef klas\xF6r (\xF6rn: Courses/MATH119/Slides) ekleyin",
+    addBtn: "Ekle",
+    historyHeader: "\u{1F552} Senkronizasyon Ge\xE7mi\u015Fi (Sync History)",
+    historySettingName: "\xC7ekme ve G\xF6rev Ge\xE7mi\u015Fi",
+    historySettingDesc: "Her senkronizasyonda hangi ders/hafta alt\u0131na hangi \xF6devlerin, alt g\xF6revlerin veya slaytlar\u0131n eklendi\u011Fini g\xF6sterir.",
+    historyRebuildBtn: "Vault'tan Ge\xE7mi\u015Fi Yenile",
+    historyClearBtn: "Ge\xE7mi\u015Fi Temizle",
+    historyEmpty: `Hen\xFCz kaydedilmi\u015F bir senkronizasyon ge\xE7mi\u015Fi yok. "Sync ODTUClass" veya "Vault'tan Ge\xE7mi\u015Fi Yenile" butonuna t\u0131klayabilirsiniz.`,
+    statusTodo: "Yap\u0131lacak",
+    statusInProgress: "Devam Ediyor",
+    statusDone: "Tamamland\u0131",
+    labelStart: "Ba\u015Flang\u0131\xE7",
+    labelDue: "Teslim",
+    labelClose: "Kapan\u0131\u015F",
+    labelStatus: "Durum"
+  },
+  en: {
+    settingsTitle: "ODTUClass Sync Settings",
+    languageName: "Interface & Template Language",
+    languageDesc: "Language used for plugin settings, notices, and task status labels",
+    taskFormatName: "Task Format Mode",
+    taskFormatDesc: "Choose DotPM hierarchy mode or standard Obsidian Markdown/Tasks mode",
+    taskFormatDotpm: "DotPM Mode (Project & Subtask Hierarchy)",
+    taskFormatStandard: "Standard Obsidian Mode (Markdown & Tasks)",
+    setupWizardBtnName: "Quick Setup Wizard",
+    setupWizardBtnDesc: "Step-by-step configuration wizard for GitHub, folders, language, and templates",
+    setupWizardBtnText: "Open Setup Wizard",
+    outputFolderName: "Output Folder",
+    outputFolderDesc: "Vault folder where new assignments and weekly tasks will be created",
+    templateFolderName: "Template Folder",
+    templateFolderDesc: "Vault folder where task templates are stored (auto-created if missing)",
+    repairTemplatesBtn: "Create / Repair Templates",
+    templatesCreatedNotice: "Default ODTUClass templates verified and created.",
+    githubHeader: "GitHub Sync",
+    githubOwnerName: "GitHub Owner",
+    githubOwnerDesc: "GitHub username or organization hosting your odtuclass-sync repository",
+    githubRepoName: "GitHub Repository",
+    githubRepoDesc: "Repository name (e.g. odtuclass-sync)",
+    githubTokenName: "GitHub Token (Fine-grained PAT)",
+    githubTokenDesc: "Personal Access Token with Contents Read (and Write for saving config) access",
+    syncNowName: "Sync from GitHub",
+    syncNowDesc: "Manually trigger a sync of assignments, sections, and slides from GitHub",
+    syncNowBtn: "Sync ODTUClass",
+    ntfyHeader: "\u{1F514} Notification & Academic Term Filters (ntfy / Bot)",
+    ntfyDesc: "Choose which ODTUClass categories send push notifications to ntfy. (Non-task announcements and attendance never clutter your Obsidian tasks.)",
+    ntfyLoadBtn: "Load Filters from GitHub",
+    ntfySaveBtn: "Save Filters to GitHub",
+    ntfySavedNotice: "Notification and term settings saved to GitHub (.odtuclass/config.json)!",
+    ntfySaveErrorNotice: "Could not push config to GitHub (check Token write permission). Saved locally.",
+    termSettingName: "Academic Term Detection",
+    termSettingDesc: "In Auto mode, Fall, Spring, or Summer term is detected automatically from the current date",
+    termAuto: "Auto Detect (Recommended)",
+    cat_assignment: "Assignments (Moodle Assign, Pearson, Turnitin, VPL)",
+    cat_quiz: "Quizzes & Exams",
+    cat_recitation: "Recitations & Worksheets (PDF)",
+    cat_lab: "Laboratory Tasks & Manuals",
+    cat_section: "Weekly Course Section Updates",
+    cat_announcement: "Course Announcements & Calendar Events (Forum & Calendar)",
+    cat_survey: "Surveys & Polls (Choice / Feedback)",
+    cat_attendance: "Attendance Notices",
+    slidesHeader: "\u{1F4CA} Course Slides Sync",
+    autoFormatSlidesName: 'Standardize slide filenames (e.g. "2026 Week 1a.pdf")',
+    autoFormatSlidesDesc: 'Automatically formats raw filenames like "CENG111-2026--Week1a.pdf" into "2026 Week 1a.pdf".',
+    scanSlidesName: "Scan Courses with Slides from GitHub",
+    scanSlidesDesc: "Reads the slide manifest from your GitHub repo and adds detected courses below.",
+    scanSlidesBtn: "Detect Courses",
+    addSlideCourseName: "Add Course Slide Folder Manually",
+    addSlideCourseDesc: "Add a course code (e.g. MATH119) and target Vault folder (e.g. Courses/MATH119/Slides)",
+    addBtn: "Add",
+    historyHeader: "\u{1F552} Sync History",
+    historySettingName: "Sync & Task History",
+    historySettingDesc: "Shows which assignments, subtasks, or slides were added/updated in each sync run.",
+    historyRebuildBtn: "Rebuild History from Vault",
+    historyClearBtn: "Clear History",
+    historyEmpty: 'No sync history recorded yet. Click "Sync ODTUClass" or "Rebuild History from Vault".',
+    statusTodo: "To Do",
+    statusInProgress: "In Progress",
+    statusDone: "Completed",
+    labelStart: "Opened",
+    labelDue: "Due",
+    labelClose: "Closes",
+    labelStatus: "Status"
+  }
+};
+function t(lang, key) {
+  const l = lang === "en" ? "en" : "tr";
+  return TRANSLATIONS[l][key] || TRANSLATIONS.tr[key] || String(key);
+}
+function getDefaultTemplateContent(templateName, lang = "tr", taskFormat = "dotpm") {
+  const isEn = lang === "en";
+  const startLbl = isEn ? "Opened" : "Ba\u015Flang\u0131\xE7";
+  const dueLbl = isEn ? "Due" : "Teslim";
+  const closeLbl = isEn ? "Closes" : "Kapan\u0131\u015F";
+  const statusLbl = isEn ? "Status" : "Durum";
+  const todoVal = isEn ? "To Do" : "Yap\u0131lacak";
+  if (templateName === "Section") {
+    const fm2 = taskFormat === "dotpm" ? `---
+pm-task: true
+projectId: "[[Odt\xFCClass Tasks|Odt\xFCClass Tasks]]"
+parentId: "[[{{parentFileName}}|{{parentTitle}}]]"
+id: "{{id}}"
+title: "{{cleanTitle}}"
+type: "subtask"
+status: "todo"
+priority: "medium"
+due: "{{weekEnd}}"
+weekStart: "{{weekStart}}"
+weekEnd: "{{weekEnd}}"
+subtaskIds: []
+tags:
+  - odtuclass
+  - section
+  - coursework
+odtuclass-url: "{{url}}"
+odtuclass-course-id: "{{courseId}}"
+odtuclass-course: "{{courseName}}"
+odtuclass-section-id: "{{sectionId}}"
+odtuclass-hash: "{{contentHash}}"
+---` : `---
+id: "{{id}}"
+title: "{{cleanTitle}}"
+type: "section"
+status: "todo"
+due: "{{weekEnd}}"
+weekStart: "{{weekStart}}"
+weekEnd: "{{weekEnd}}"
+tags:
+  - odtuclass
+  - section
+odtuclass-url: "{{url}}"
+odtuclass-course-id: "{{courseId}}"
+odtuclass-course: "{{courseName}}"
+odtuclass-section-id: "{{sectionId}}"
+odtuclass-hash: "{{contentHash}}"
+---`;
+    return `${fm2}
+
+# {{cleanTitle}}
+
+**Course:** [[{{parentFileName}}|{{parentTitle}}]]  
+**Week Range:** {{weekStart}} \u2014 {{weekEnd}}  
+**ODTUClass Section:** [View on ODTUClass]({{url}})  
+
+## Coursework & Details
+
+<!-- ODTUCLASS:BEGIN -->
+{{content}}
+<!-- ODTUCLASS:END -->
+
+## Subtasks
+
+<!-- ODTUCLASS:SUBTASKS:BEGIN -->
+<!-- ODTUCLASS:SUBTASKS:END -->
+
+## My Notes & Workspace
+
+- [ ] 
+`;
+  }
+  if (templateName === "Subtask") {
+    const fm2 = taskFormat === "dotpm" ? `---
+pm-task: true
+projectId: "[[Odt\xFCClass Tasks|Odt\xFCClass Tasks]]"
+parentId: "[[{{parentFileName}}|{{parentTitle}}]]"
+id: "{{id}}"
+title: "{{title}}"
+type: "subtask"
+status: "todo"
+priority: "medium"
+due: "{{dueDate}}"
+subtaskIds: []
+tags:
+  - odtuclass
+  - coursework
+  - practice
+---` : `---
+id: "{{id}}"
+title: "{{title}}"
+type: "subtask"
+status: "todo"
+due: "{{dueDate}}"
+tags:
+  - odtuclass
+  - practice
+---`;
+    return `${fm2}
+
+Parent: [[{{parentFileName}}|{{parentTitle}}]]
+
+## Suggested Problems (Ch. {{chapter}})
+
+{{problemsList}}
+
+## My Notes & Workspace
+
+- [ ] 
+`;
+  }
+  const modLabel = templateName === "Quiz" ? "Quiz" : templateName === "Interactive" ? "Interactive Activity" : "Assignment";
+  const fm = taskFormat === "dotpm" ? `---
+pm-task: true
+projectId: "[[Odt\xFCClass Tasks|Odt\xFCClass Tasks]]"
+parentId: "[[{{parentFileName}}|{{parentTitle}}]]"
+id: "{{id}}"
+title: "{{cleanTitle}}"
+type: "subtask"
+status: "todo"
+priority: "medium"
+start: "{{openDate}}"
+due: "{{dueDate}}"
+tags:
+  - odtuclass
+  - "{{moduleType}}"
+odtuclass-url: "{{url}}"
+odtuclass-course-id: "{{courseId}}"
+odtuclass-course: "{{courseName}}"
+odtuclass-module-id: "{{moduleId}}"
+odtuclass-module-type: "{{moduleType}}"
+opened: "{{openDate}}"
+---` : `---
+id: "{{id}}"
+title: "{{cleanTitle}}"
+type: "assignment"
+status: "todo"
+start: "{{openDate}}"
+due: "{{dueDate}}"
+tags:
+  - odtuclass
+  - "{{moduleType}}"
+odtuclass-url: "{{url}}"
+odtuclass-course-id: "{{courseId}}"
+odtuclass-course: "{{courseName}}"
+odtuclass-module-id: "{{moduleId}}"
+odtuclass-module-type: "{{moduleType}}"
+opened: "{{openDate}}"
+---`;
+  const standardTaskLine = taskFormat === "standard" ? `
+- [ ] {{cleanTitle}} \u{1F4C5} {{dueDate}}
+` : "";
+  return `${fm}
+
+# {{cleanTitle}}
+
+**Course:** [[{{parentFileName}}|{{parentTitle}}]]  
+**Module Type:** ${modLabel}  
+**ODTUClass:** [View on ODTUClass]({{url}})  
+${standardTaskLine}
+- **${startLbl}:** {{openDate}} {{openTime}}
+- **${dueLbl}:** {{dueDate}} {{dueTime}}
+- **${closeLbl}:** {{closeDate}} {{closeTime}}
+- **${statusLbl}:** ${todoVal}
+
+## Description
+`;
+}
 
 // src/main.ts
+var DEFAULT_NTFY_FILTER = {
+  assignment: true,
+  quiz: true,
+  recitation: true,
+  lab: true,
+  section: true,
+  announcement: true,
+  survey: false,
+  attendance: false
+};
 var DEFAULT_SETTINGS = {
+  language: "tr",
+  taskFormat: "dotpm",
   outputFolder: "Projects/Odt\xFCClass Tasks/_tasks",
   templateFolder: "ODTUClass/Templates",
   githubOwner: "Keremdogan1",
   githubRepo: "odtuclass-sync",
   githubToken: "",
+  academicYear: "auto",
+  semester: "auto",
+  ntfyFilter: { ...DEFAULT_NTFY_FILTER },
   autoFormatSlideNames: true,
   courseSlideConfigs: {
     CENG111: {
@@ -558,6 +952,13 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
         this.processPendingAssignments();
       }
     });
+    this.addCommand({
+      id: "open-setup-wizard",
+      name: "Open Setup Wizard / Kurulum Sihirbaz\u0131",
+      callback: () => {
+        new SetupWizardModal(this.app, this).open();
+      }
+    });
     this.settingTab = new ODTUClassSettingTab(this.app, this);
     this.addSettingTab(this.settingTab);
     this.registerEvent(
@@ -568,22 +969,61 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
       })
     );
   }
+  async ensureDefaultTemplates(overwrite = false) {
+    const folderPath = (this.settings.templateFolder || "ODTUClass/Templates").replace(/\/+$/, "");
+    if (!this.app.vault.getAbstractFileByPath(folderPath)) {
+      await this.createFolderRecursive(folderPath);
+    }
+    const templateNames = [
+      "Assignment",
+      "Quiz",
+      "Interactive",
+      "Section",
+      "Subtask"
+    ];
+    let written = 0;
+    for (const name of templateNames) {
+      const filePath = `${folderPath}/${name}.md`;
+      const existing = this.app.vault.getAbstractFileByPath(filePath);
+      const content = getDefaultTemplateContent(
+        name,
+        this.settings.language || "tr",
+        this.settings.taskFormat || "dotpm"
+      );
+      if (!existing) {
+        await this.app.vault.create(filePath, content);
+        written++;
+      } else if (overwrite && existing instanceof import_obsidian2.TFile) {
+        await this.app.vault.modify(existing, content);
+        written++;
+      }
+    }
+    return written;
+  }
   async syncTaskBodyStatusWithFrontmatter(file) {
     const cache = this.app.metadataCache.getFileCache(file);
     const fm = cache == null ? void 0 : cache.frontmatter;
-    if (!fm || !fm["pm-task"] || !fm.status)
+    if (!fm || !fm.status)
       return;
-    const statusStr = String(fm.status).toLowerCase().trim();
-    let expectedDurum = "Yap\u0131lacak";
-    if (statusStr === "done" || statusStr === "completed" || statusStr === "complete") {
-      expectedDurum = "Tamamland\u0131";
-    } else if (statusStr === "in-progress" || statusStr === "doing") {
-      expectedDurum = "Devam Ediyor";
+    if (!fm["pm-task"] && !fm["odtuclass-course-id"] && !(Array.isArray(fm.tags) && fm.tags.includes("odtuclass"))) {
+      return;
     }
+    const statusStr = String(fm.status).toLowerCase().trim();
+    const isEn = this.settings.language === "en";
     const content = await this.app.vault.read(file);
-    const durumRegex = /^(-\s*\*\*Durum:\*\*\s*)(.*)$/m;
+    const durumRegex = /^(-\s*\*\*(Durum|Status):\*\*\s*)(.*)$/m;
     const match = content.match(durumRegex);
-    if (match && match[2].trim() !== expectedDurum) {
+    if (!match)
+      return;
+    const labelInFile = match[2];
+    const useEnForFile = labelInFile.toLowerCase() === "status" || isEn;
+    let expectedDurum = useEnForFile ? "To Do" : "Yap\u0131lacak";
+    if (statusStr === "done" || statusStr === "completed" || statusStr === "complete") {
+      expectedDurum = useEnForFile ? "Completed" : "Tamamland\u0131";
+    } else if (statusStr === "in-progress" || statusStr === "doing") {
+      expectedDurum = useEnForFile ? "In Progress" : "Devam Ediyor";
+    }
+    if (match[3].trim() !== expectedDurum) {
       const updated = content.replace(durumRegex, `$1${expectedDurum}`);
       await this.app.vault.modify(file, updated);
     }
@@ -597,6 +1037,11 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
       {},
       DEFAULT_SETTINGS.courseSlideConfigs,
       (loaded == null ? void 0 : loaded.courseSlideConfigs) || {}
+    );
+    this.settings.ntfyFilter = Object.assign(
+      {},
+      DEFAULT_NTFY_FILTER,
+      (loaded == null ? void 0 : loaded.ntfyFilter) || {}
     );
     if (!Array.isArray(this.settings.syncHistory)) {
       this.settings.syncHistory = [];
@@ -1389,13 +1834,25 @@ ${fmText}
     }
     const templateName = isSection ? "Section" : this.getTemplateNameForModuleType(assignment.moduleType);
     const templatePath = `${this.settings.templateFolder}/${templateName}.md`;
-    const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
+    let templateFile = this.app.vault.getAbstractFileByPath(templatePath);
     if (!templateFile || !(templateFile instanceof import_obsidian2.TFile)) {
-      console.warn(`Template ${templatePath} not found for assignment ${assignment.id}.`);
-      new import_obsidian2.Notice(`Template not found: ${templateName}.md`);
-      throw new Error("TemplateNotFound");
+      try {
+        await this.ensureDefaultTemplates(false);
+        templateFile = this.app.vault.getAbstractFileByPath(templatePath);
+      } catch (e) {
+        console.warn("Could not auto-create template folder:", e);
+      }
     }
-    const templateContent = await this.app.vault.read(templateFile);
+    let templateContent;
+    if (templateFile && templateFile instanceof import_obsidian2.TFile) {
+      templateContent = await this.app.vault.read(templateFile);
+    } else {
+      templateContent = getDefaultTemplateContent(
+        templateName,
+        this.settings.language || "tr",
+        this.settings.taskFormat || "dotpm"
+      );
+    }
     const renderedContent = this.renderTemplate(templateContent, assignment, {
       parentFileName: parentTask.basename,
       parentTitle: parentTask.title,
@@ -1516,21 +1973,23 @@ $&`);
               updatedContent = updatedContent.replace(/^opened:\s*.*$/m, `opened: "${open.date}"`);
             }
             const openDisplay = `${open.date}${open.time ? ` ${open.time}` : ""}`;
-            if (/^-\s*\*\*(?:Açılış|Başlangıç):\*\*\s*.*$/m.test(updatedContent)) {
-              updatedContent = updatedContent.replace(/^-\s*\*\*(Açılış|Başlangıç):\*\*\s*.*$/m, `- **$1:** ${openDisplay}`);
-            } else if (/^-\s*\*\*Teslim:\*\*\s*.*$/m.test(updatedContent)) {
-              updatedContent = updatedContent.replace(/^-\s*\*\*Teslim:\*\*\s*.*$/m, `- **Ba\u015Flang\u0131\xE7:** ${openDisplay}
+            if (/^-\s*\*\*(?:Açılış|Başlangıç|Opened):\*\*\s*.*$/m.test(updatedContent)) {
+              updatedContent = updatedContent.replace(/^-\s*\*\*(Açılış|Başlangıç|Opened):\*\*\s*.*$/m, `- **$1:** ${openDisplay}`);
+            } else if (/^-\s*\*\*(?:Teslim|Due):\*\*\s*.*$/m.test(updatedContent)) {
+              const openLbl = this.settings.language === "en" ? "Opened" : "Ba\u015Flang\u0131\xE7";
+              updatedContent = updatedContent.replace(/^-\s*\*\*(?:Teslim|Due):\*\*\s*.*$/m, `- **${openLbl}:** ${openDisplay}
 $&`);
             }
           }
           if (due.date) {
             updatedContent = updatedContent.replace(/^due:\s*.*$/m, `due: "${due.date}"`);
             const dueDisplay = `${due.date}${due.time ? ` ${due.time}` : ""}`;
-            updatedContent = updatedContent.replace(/^(-\s*\*\*Teslim:\*\*\s*).*$/m, `$1${dueDisplay}`);
+            updatedContent = updatedContent.replace(/^(-\s*\*\*(?:Teslim|Due):\*\*\s*).*$/m, `$1${dueDisplay}`);
           }
-          const expectedDurum = finalStatus === "done" ? "Tamamland\u0131" : finalStatus === "in-progress" ? "Devam Ediyor" : "Yap\u0131lacak";
-          if (/^-\s*\*\*Durum:\*\*\s*.*$/m.test(updatedContent)) {
-            updatedContent = updatedContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1${expectedDurum}`);
+          const isEnFile = /^-\s*\*\*Status:\*\*/m.test(updatedContent) || this.settings.language === "en";
+          const expectedDurum = finalStatus === "done" ? isEnFile ? "Completed" : "Tamamland\u0131" : finalStatus === "in-progress" ? isEnFile ? "In Progress" : "Devam Ediyor" : isEnFile ? "To Do" : "Yap\u0131lacak";
+          if (/^-\s*\*\*(?:Durum|Status):\*\*\s*.*$/m.test(updatedContent)) {
+            updatedContent = updatedContent.replace(/^(-\s*\*\*(?:Durum|Status):\*\*\s*).*$/m, `$1${expectedDurum}`);
           }
           const descText = String(assignment.description || assignment.content || "").trim();
           if (descText) {
@@ -1566,12 +2025,19 @@ ${descEnd}`
         initialContent = initialContent.replace(/^due:\s*.*$/m, `start: "${open.date}"
 $&`);
       }
+      const isEnFile = /^-\s*\*\*Status:\*\*/m.test(initialContent) || this.settings.language === "en";
       if (assignment.status === "done") {
         initialContent = initialContent.replace(/^status:\s*.*$/m, `status: "done"`);
-        initialContent = initialContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1Tamamland\u0131`);
+        initialContent = initialContent.replace(
+          /^(-\s*\*\*(?:Durum|Status):\*\*\s*).*$/m,
+          `$1${isEnFile ? "Completed" : "Tamamland\u0131"}`
+        );
       } else if (assignment.status === "in-progress") {
         initialContent = initialContent.replace(/^status:\s*.*$/m, `status: "in-progress"`);
-        initialContent = initialContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1Devam Ediyor`);
+        initialContent = initialContent.replace(
+          /^(-\s*\*\*(?:Durum|Status):\*\*\s*).*$/m,
+          `$1${isEnFile ? "In Progress" : "Devam Ediyor"}`
+        );
       }
       targetFile = await this.app.vault.create(outputPath, initialContent);
       action = "created";
@@ -1986,6 +2452,82 @@ ${descEnd}`
     return result;
   }
 };
+var SetupWizardModal = class extends import_obsidian2.Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    const lang = this.plugin.settings.language || "tr";
+    const isEn = lang === "en";
+    contentEl.createEl("h2", {
+      text: isEn ? "\u{1F680} ODTUClass Sync Setup Wizard" : "\u{1F680} ODTUClass Kurulum Sihirbaz\u0131"
+    });
+    contentEl.createEl("p", {
+      text: isEn ? "Configure your language, task mode, and GitHub connection in one place." : "Dil tercihinizi, g\xF6rev format\u0131n\u0131z\u0131 ve GitHub ba\u011Flant\u0131n\u0131z\u0131 tek ad\u0131mda yap\u0131land\u0131r\u0131n."
+    });
+    new import_obsidian2.Setting(contentEl).setName(t(lang, "languageName")).addDropdown(
+      (dd) => dd.addOption("tr", "T\xFCrk\xE7e").addOption("en", "English").setValue(this.plugin.settings.language || "tr").onChange(async (val) => {
+        this.plugin.settings.language = val === "en" ? "en" : "tr";
+        await this.plugin.saveSettings();
+        this.onOpen();
+      })
+    );
+    new import_obsidian2.Setting(contentEl).setName(t(lang, "taskFormatName")).setDesc(t(lang, "taskFormatDesc")).addDropdown(
+      (dd) => dd.addOption("dotpm", t(lang, "taskFormatDotpm")).addOption("standard", t(lang, "taskFormatStandard")).setValue(this.plugin.settings.taskFormat || "dotpm").onChange(async (val) => {
+        this.plugin.settings.taskFormat = val === "standard" ? "standard" : "dotpm";
+        if (val === "standard" && this.plugin.settings.outputFolder === "Projects/Odt\xFCClass Tasks/_tasks") {
+          this.plugin.settings.outputFolder = "ODTUClass/Tasks";
+        }
+        await this.plugin.saveSettings();
+        this.onOpen();
+      })
+    );
+    new import_obsidian2.Setting(contentEl).setName(t(lang, "outputFolderName")).addText(
+      (text) => text.setValue(this.plugin.settings.outputFolder).onChange(async (val) => {
+        this.plugin.settings.outputFolder = val.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(contentEl).setName(t(lang, "githubOwnerName")).addText(
+      (text) => text.setPlaceholder("github-username").setValue(this.plugin.settings.githubOwner).onChange(async (val) => {
+        this.plugin.settings.githubOwner = val.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(contentEl).setName(t(lang, "githubRepoName")).addText(
+      (text) => text.setPlaceholder("odtuclass-sync").setValue(this.plugin.settings.githubRepo).onChange(async (val) => {
+        this.plugin.settings.githubRepo = val.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(contentEl).setName(t(lang, "githubTokenName")).addText((text) => {
+      text.inputEl.type = "password";
+      text.setPlaceholder("github_pat_...").setValue(this.plugin.settings.githubToken).onChange(async (val) => {
+        this.plugin.settings.githubToken = val.trim();
+        await this.plugin.saveSettings();
+      });
+    });
+    new import_obsidian2.Setting(contentEl).addButton(
+      (btn) => btn.setButtonText(
+        isEn ? "Create Templates & Finish Setup" : "\u015Eablonlar\u0131 Olu\u015Ftur ve Kurulumu Tamamla"
+      ).setCta().onClick(async () => {
+        await this.plugin.ensureDefaultTemplates(false);
+        await this.plugin.saveSettings();
+        if (this.plugin.settingTab) {
+          this.plugin.settingTab.display();
+        }
+        new import_obsidian2.Notice(t(lang, "templatesCreatedNotice"));
+        this.close();
+      })
+    );
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
 var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -1993,49 +2535,143 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
   }
   display() {
     const { containerEl } = this;
+    const lang = this.plugin.settings.language || "tr";
+    const isEn = lang === "en";
     containerEl.empty();
-    containerEl.createEl("h2", { text: "ODTUClass Sync Settings" });
-    new import_obsidian2.Setting(containerEl).setName("Output folder").setDesc("Folder where new assignments will be created (e.g. Projects/Odt\xFCClass Tasks/_tasks)").addText((text) => text.setPlaceholder("Projects/Odt\xFCClass Tasks/_tasks").setValue(this.plugin.settings.outputFolder).onChange(async (value) => {
+    containerEl.createEl("h2", { text: t(lang, "settingsTitle") });
+    new import_obsidian2.Setting(containerEl).setName(t(lang, "setupWizardBtnName")).setDesc(t(lang, "setupWizardBtnDesc")).addButton(
+      (btn) => btn.setButtonText(t(lang, "setupWizardBtnText")).onClick(() => {
+        new SetupWizardModal(this.app, this.plugin).open();
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName(t(lang, "languageName")).setDesc(t(lang, "languageDesc")).addDropdown(
+      (dd) => dd.addOption("tr", "T\xFCrk\xE7e (TR)").addOption("en", "English (EN)").setValue(this.plugin.settings.language || "tr").onChange(async (value) => {
+        this.plugin.settings.language = value === "en" ? "en" : "tr";
+        await this.plugin.saveSettings();
+        this.display();
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName(t(lang, "taskFormatName")).setDesc(t(lang, "taskFormatDesc")).addDropdown(
+      (dd) => dd.addOption("dotpm", t(lang, "taskFormatDotpm")).addOption("standard", t(lang, "taskFormatStandard")).setValue(this.plugin.settings.taskFormat || "dotpm").onChange(async (value) => {
+        this.plugin.settings.taskFormat = value === "standard" ? "standard" : "dotpm";
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName(t(lang, "outputFolderName")).setDesc(t(lang, "outputFolderDesc")).addText((text) => text.setPlaceholder("Projects/Odt\xFCClass Tasks/_tasks").setValue(this.plugin.settings.outputFolder).onChange(async (value) => {
       this.plugin.settings.outputFolder = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian2.Setting(containerEl).setName("Template folder").setDesc("Folder where templates are stored (e.g. ODTUClass/Templates)").addText((text) => text.setPlaceholder("ODTUClass/Templates").setValue(this.plugin.settings.templateFolder).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName(t(lang, "templateFolderName")).setDesc(t(lang, "templateFolderDesc")).addText((text) => text.setPlaceholder("ODTUClass/Templates").setValue(this.plugin.settings.templateFolder).onChange(async (value) => {
       this.plugin.settings.templateFolder = value;
       await this.plugin.saveSettings();
+    })).addButton((btn) => btn.setButtonText(t(lang, "repairTemplatesBtn")).onClick(async () => {
+      await this.plugin.ensureDefaultTemplates(false);
+      new import_obsidian2.Notice(t(lang, "templatesCreatedNotice"));
     }));
-    containerEl.createEl("h3", { text: "GitHub Sync" });
-    new import_obsidian2.Setting(containerEl).setName("GitHub Owner").setDesc("GitHub username or organization (e.g. Keremdogan1)").addText((text) => text.setPlaceholder("Keremdogan1").setValue(this.plugin.settings.githubOwner).onChange(async (value) => {
+    containerEl.createEl("h3", { text: t(lang, "githubHeader") });
+    new import_obsidian2.Setting(containerEl).setName(t(lang, "githubOwnerName")).setDesc(t(lang, "githubOwnerDesc")).addText((text) => text.setPlaceholder("Keremdogan1").setValue(this.plugin.settings.githubOwner).onChange(async (value) => {
       this.plugin.settings.githubOwner = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian2.Setting(containerEl).setName("GitHub Repository").setDesc("GitHub repository name (e.g. odtuclass-sync)").addText((text) => text.setPlaceholder("odtuclass-sync").setValue(this.plugin.settings.githubRepo).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName(t(lang, "githubRepoName")).setDesc(t(lang, "githubRepoDesc")).addText((text) => text.setPlaceholder("odtuclass-sync").setValue(this.plugin.settings.githubRepo).onChange(async (value) => {
       this.plugin.settings.githubRepo = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian2.Setting(containerEl).setName("GitHub Token (Fine-grained PAT)").setDesc("Token with Contents: Read-only access to the sync repository").addText((text) => {
+    new import_obsidian2.Setting(containerEl).setName(t(lang, "githubTokenName")).setDesc(t(lang, "githubTokenDesc")).addText((text) => {
       text.inputEl.type = "password";
       text.setPlaceholder("github_pat_...").setValue(this.plugin.settings.githubToken).onChange(async (value) => {
         this.plugin.settings.githubToken = value;
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian2.Setting(containerEl).setName("Sync from GitHub").setDesc("Manually trigger a sync from the configured GitHub repository").addButton((button) => button.setButtonText("Sync ODTUClass").setCta().onClick(() => {
+    new import_obsidian2.Setting(containerEl).setName(t(lang, "syncNowName")).setDesc(t(lang, "syncNowDesc")).addButton((button) => button.setButtonText(t(lang, "syncNowBtn")).setCta().onClick(() => {
       syncFromGithub(this.plugin);
     }));
-    containerEl.createEl("h3", { text: "Ders Slaytlar\u0131 (Course Slides Sync)" });
-    new import_obsidian2.Setting(containerEl).setName('Standart slayt dosya isimlendirmesi (\xD6rn: "2026 Week 1a.pdf")').setDesc('A\xE7\u0131k oldu\u011Funda ODTUClass \xFCzerindeki "CENG111-2026--Week1a.pdf" gibi ham isimler "2026 Week 1a.pdf" format\u0131na d\xF6n\xFC\u015Ft\xFCr\xFCl\xFCr.').addToggle((toggle) => toggle.setValue(this.plugin.settings.autoFormatSlideNames !== false).onChange(async (value) => {
+    containerEl.createEl("h3", { text: t(lang, "ntfyHeader") });
+    new import_obsidian2.Setting(containerEl).setName(isEn ? "Remote Bot Configuration (.odtuclass/config.json)" : "Uzaktan Bot Yap\u0131land\u0131rmas\u0131 (.odtuclass/config.json)").setDesc(t(lang, "ntfyDesc")).addButton((btn) => btn.setButtonText(t(lang, "ntfyLoadBtn")).onClick(async () => {
+      const { githubOwner, githubRepo, githubToken } = this.plugin.settings;
+      if (!githubOwner || !githubRepo || !githubToken) {
+        new import_obsidian2.Notice(isEn ? "Please fill in GitHub settings first." : "L\xFCtfen \xF6nce GitHub ayarlar\u0131n\u0131 doldurun.");
+        return;
+      }
+      const remote = await fetchRemoteConfigFromGithub(githubOwner, githubRepo, githubToken);
+      if (remote && remote.config) {
+        if (remote.config.ntfyFilter) {
+          this.plugin.settings.ntfyFilter = Object.assign(
+            {},
+            DEFAULT_NTFY_FILTER,
+            remote.config.ntfyFilter
+          );
+        }
+        if (remote.config.academicYear) {
+          this.plugin.settings.academicYear = String(remote.config.academicYear);
+        }
+        if (remote.config.semester) {
+          this.plugin.settings.semester = String(remote.config.semester);
+        }
+        await this.plugin.saveSettings();
+        this.display();
+        new import_obsidian2.Notice(isEn ? "Loaded filters from GitHub!" : "Filtreler GitHub \xFCzerinden y\xFCklendi!");
+      } else {
+        new import_obsidian2.Notice(isEn ? "No remote config.json found yet." : "GitHub \xFCzerinde hen\xFCz config.json bulunamad\u0131.");
+      }
+    })).addButton((btn) => btn.setButtonText(t(lang, "ntfySaveBtn")).setCta().onClick(async () => {
+      await this.plugin.saveSettings();
+      const { githubOwner, githubRepo, githubToken, language, academicYear, semester, ntfyFilter } = this.plugin.settings;
+      const ok = await saveRemoteConfigToGithub(githubOwner, githubRepo, githubToken, {
+        language: language || "tr",
+        academicYear: academicYear || "auto",
+        semester: semester || "auto",
+        ntfyFilter: ntfyFilter || DEFAULT_NTFY_FILTER
+      });
+      new import_obsidian2.Notice(ok ? t(lang, "ntfySavedNotice") : t(lang, "ntfySaveErrorNotice"));
+    }));
+    new import_obsidian2.Setting(containerEl).setName(t(lang, "termSettingName")).setDesc(t(lang, "termSettingDesc")).addDropdown((dd) => dd.addOption("auto", t(lang, "termAuto")).addOption("2025:f", "2025-2026 Fall (G\xFCz)").addOption("2026:s", "2025-2026 Spring (Bahar)").addOption("2026:u", "2026 Summer (Yaz)").addOption("2026:f", "2026-2027 Fall (G\xFCz)").addOption("2027:s", "2026-2027 Spring (Bahar)").addOption("2027:u", "2027 Summer (Yaz)").setValue(
+      this.plugin.settings.academicYear && this.plugin.settings.academicYear !== "auto" ? `${this.plugin.settings.academicYear}:${this.plugin.settings.semester || "f"}` : "auto"
+    ).onChange(async (val) => {
+      if (val === "auto") {
+        this.plugin.settings.academicYear = "auto";
+        this.plugin.settings.semester = "auto";
+      } else {
+        const [y, s] = val.split(":");
+        this.plugin.settings.academicYear = y;
+        this.plugin.settings.semester = s;
+      }
+      await this.plugin.saveSettings();
+    }));
+    const filterKeys = [
+      { key: "assignment", labelKey: "cat_assignment" },
+      { key: "quiz", labelKey: "cat_quiz" },
+      { key: "recitation", labelKey: "cat_recitation" },
+      { key: "lab", labelKey: "cat_lab" },
+      { key: "section", labelKey: "cat_section" },
+      { key: "announcement", labelKey: "cat_announcement" },
+      { key: "survey", labelKey: "cat_survey" },
+      { key: "attendance", labelKey: "cat_attendance" }
+    ];
+    if (!this.plugin.settings.ntfyFilter) {
+      this.plugin.settings.ntfyFilter = { ...DEFAULT_NTFY_FILTER };
+    }
+    for (const item of filterKeys) {
+      new import_obsidian2.Setting(containerEl).setName(t(lang, item.labelKey)).addToggle((toggle) => toggle.setValue(Boolean(this.plugin.settings.ntfyFilter[item.key])).onChange(async (val) => {
+        this.plugin.settings.ntfyFilter[item.key] = val;
+        await this.plugin.saveSettings();
+      }));
+    }
+    containerEl.createEl("h3", { text: t(lang, "slidesHeader") });
+    new import_obsidian2.Setting(containerEl).setName(t(lang, "autoFormatSlidesName")).setDesc(t(lang, "autoFormatSlidesDesc")).addToggle((toggle) => toggle.setValue(this.plugin.settings.autoFormatSlideNames !== false).onChange(async (value) => {
       this.plugin.settings.autoFormatSlideNames = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian2.Setting(containerEl).setName("Slayt\u0131 Bulunan Dersleri GitHub'dan Tara").setDesc("GitHub deponuzdaki slayt manifestosunu kontrol ederek slayt tespit edilen dersleri a\u015Fa\u011F\u0131daki listeye ekler.").addButton((button) => button.setButtonText("Dersleri Alg\u0131la").onClick(async () => {
+    new import_obsidian2.Setting(containerEl).setName(t(lang, "scanSlidesName")).setDesc(t(lang, "scanSlidesDesc")).addButton((button) => button.setButtonText(t(lang, "scanSlidesBtn")).onClick(async () => {
       const { githubOwner, githubRepo, githubToken } = this.plugin.settings;
       if (!githubOwner || !githubRepo || !githubToken) {
-        new import_obsidian2.Notice("L\xFCtfen \xF6nce GitHub ayarlar\u0131n\u0131 doldurun.");
+        new import_obsidian2.Notice(isEn ? "Please fill in GitHub settings first." : "L\xFCtfen \xF6nce GitHub ayarlar\u0131n\u0131 doldurun.");
         return;
       }
       const manifest = await fetchSlideManifestFromGithub(githubOwner, githubRepo, githubToken);
       if (!manifest) {
-        new import_obsidian2.Notice("GitHub \xFCzerinde hen\xFCz slayt manifestosu (.odtuclass/slides/manifest.json) bulunamad\u0131.");
+        new import_obsidian2.Notice(isEn ? "No slide manifest found on GitHub yet." : "GitHub \xFCzerinde hen\xFCz slayt manifestosu (.odtuclass/slides/manifest.json) bulunamad\u0131.");
         return;
       }
       const coursesMap = {};
@@ -2075,11 +2711,13 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
       }
       await this.plugin.saveSettings();
       this.display();
-      new import_obsidian2.Notice(added > 0 ? `${added} yeni ders eklendi.` : `T\xFCm slaytl\u0131 dersler (${Object.keys(coursesMap).join(", ") || "yok"}) zaten listede.`);
+      new import_obsidian2.Notice(
+        added > 0 ? isEn ? `Added ${added} new course(s).` : `${added} yeni ders eklendi.` : isEn ? `All courses with slides (${Object.keys(coursesMap).join(", ") || "none"}) are already listed.` : `T\xFCm slaytl\u0131 dersler (${Object.keys(coursesMap).join(", ") || "yok"}) zaten listede.`
+      );
     }));
     const configs = this.plugin.settings.courseSlideConfigs || {};
     for (const [courseCode, cfg] of Object.entries(configs)) {
-      new import_obsidian2.Setting(containerEl).setName(`${courseCode} Slayt Senkronizasyonu`).setDesc(`${cfg.courseName || courseCode} dersinin slaytlar\u0131 i\xE7in hedef Vault klas\xF6r\xFC`).addToggle((toggle) => toggle.setTooltip("Bu dersin slaytlar\u0131n\u0131 senkronize et").setValue(cfg.enabled).onChange(async (value) => {
+      new import_obsidian2.Setting(containerEl).setName(`${courseCode} ${isEn ? "Slide Sync" : "Slayt Senkronizasyonu"}`).setDesc(`${cfg.courseName || courseCode}`).addToggle((toggle) => toggle.setTooltip(isEn ? "Sync slides for this course" : "Bu dersin slaytlar\u0131n\u0131 senkronize et").setValue(cfg.enabled).onChange(async (value) => {
         cfg.enabled = value;
         cfg.prompted = true;
         await this.plugin.saveSettings();
@@ -2087,7 +2725,7 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
         cfg.targetFolder = value.trim().replace(/^\/+|\/+$/g, "") || `Courses/${courseCode}/Slides`;
         cfg.prompted = true;
         await this.plugin.saveSettings();
-      })).addExtraButton((btn) => btn.setIcon("trash").setTooltip("Bu dersin slayt ayar\u0131n\u0131 kald\u0131r").onClick(async () => {
+      })).addExtraButton((btn) => btn.setIcon("trash").setTooltip(isEn ? "Remove course slide config" : "Bu dersin slayt ayar\u0131n\u0131 kald\u0131r").onClick(async () => {
         delete this.plugin.settings.courseSlideConfigs[courseCode];
         await this.plugin.saveSettings();
         this.display();
@@ -2095,13 +2733,13 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
     }
     let newCourseCode = "";
     let newCourseFolder = "";
-    new import_obsidian2.Setting(containerEl).setName("Manuel Ders Slayt Klas\xF6r\xFC Ekle").setDesc("Yeni bir ders kodu (\xF6rn: MATH119) ve hedef klas\xF6r (\xF6rn: Courses/MATH119/Slides) ekleyin").addText((text) => text.setPlaceholder("Ders Kodu (\xF6rn: MATH119)").onChange((val) => {
+    new import_obsidian2.Setting(containerEl).setName(t(lang, "addSlideCourseName")).setDesc(t(lang, "addSlideCourseDesc")).addText((text) => text.setPlaceholder(isEn ? "Course Code (e.g. MATH119)" : "Ders Kodu (\xF6rn: MATH119)").onChange((val) => {
       newCourseCode = val.trim().toUpperCase().replace(/\s+/g, "");
-    })).addText((text) => text.setPlaceholder("Hedef Klas\xF6r (\xF6rn: Courses/MATH119/Slides)").onChange((val) => {
+    })).addText((text) => text.setPlaceholder(isEn ? "Target Folder (e.g. Courses/MATH119/Slides)" : "Hedef Klas\xF6r (\xF6rn: Courses/MATH119/Slides)").onChange((val) => {
       newCourseFolder = val.trim().replace(/^\/+|\/+$/g, "");
-    })).addButton((btn) => btn.setButtonText("Ekle").onClick(async () => {
+    })).addButton((btn) => btn.setButtonText(t(lang, "addBtn")).onClick(async () => {
       if (!newCourseCode) {
-        new import_obsidian2.Notice("L\xFCtfen bir ders kodu girin.");
+        new import_obsidian2.Notice(isEn ? "Please enter a course code." : "L\xFCtfen bir ders kodu girin.");
         return;
       }
       this.plugin.settings.courseSlideConfigs[newCourseCode] = {
@@ -2114,16 +2752,18 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
       await this.plugin.saveSettings();
       this.display();
     }));
-    containerEl.createEl("h3", { text: "\u{1F552} Senkronizasyon Ge\xE7mi\u015Fi (Sync History)" });
-    new import_obsidian2.Setting(containerEl).setName("\xC7ekme ve G\xF6rev Ge\xE7mi\u015Fi").setDesc("Her senkronizasyonda hangi ders/hafta alt\u0131na hangi \xF6devlerin, alt g\xF6revlerin veya slaytlar\u0131n eklendi\u011Fini g\xF6sterir.").addButton((btn) => btn.setButtonText("Vault'tan Ge\xE7mi\u015Fi Yenile").setTooltip("processed.json ve mevcut g\xF6rev dosyalar\u0131ndan ge\xE7mi\u015F kay\u0131tlar\u0131 yeniden olu\u015Fturur").onClick(async () => {
+    containerEl.createEl("h3", { text: t(lang, "historyHeader") });
+    new import_obsidian2.Setting(containerEl).setName(t(lang, "historySettingName")).setDesc(t(lang, "historySettingDesc")).addButton((btn) => btn.setButtonText(t(lang, "historyRebuildBtn")).onClick(async () => {
       const count = await this.plugin.seedSyncHistoryFromVault(true);
       this.display();
-      new import_obsidian2.Notice(`Senkronizasyon ge\xE7mi\u015Fi yenilendi (${count} ge\xE7mi\u015F oturum bulundu).`);
-    })).addButton((btn) => btn.setButtonText("Ge\xE7mi\u015Fi Temizle").setWarning().onClick(async () => {
+      new import_obsidian2.Notice(
+        isEn ? `Sync history rebuilt (${count} past sessions found).` : `Senkronizasyon ge\xE7mi\u015Fi yenilendi (${count} ge\xE7mi\u015F oturum bulundu).`
+      );
+    })).addButton((btn) => btn.setButtonText(t(lang, "historyClearBtn")).setWarning().onClick(async () => {
       this.plugin.settings.syncHistory = [];
       await this.plugin.saveSettings();
       this.display();
-      new import_obsidian2.Notice("Senkronizasyon ge\xE7mi\u015Fi temizlendi.");
+      new import_obsidian2.Notice(isEn ? "Sync history cleared." : "Senkronizasyon ge\xE7mi\u015Fi temizlendi.");
     }));
     const historyContainer = containerEl.createDiv({ cls: "odtuclass-sync-history-container" });
     historyContainer.style.display = "flex";
@@ -2140,7 +2780,7 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
         emptyEl.style.background = "var(--background-secondary)";
         emptyEl.style.color = "var(--text-muted)";
         emptyEl.style.fontSize = "0.9em";
-        emptyEl.setText(`Hen\xFCz kaydedilmi\u015F bir senkronizasyon ge\xE7mi\u015Fi yok. "Sync ODTUClass" veya "Vault'tan Ge\xE7mi\u015Fi Yenile" butonuna t\u0131klayabilirsiniz.`);
+        emptyEl.setText(t(lang, "historyEmpty"));
         return;
       }
       history.forEach((entry, idx) => {
@@ -2165,7 +2805,7 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
         try {
           const d = new Date(entry.timestamp);
           if (!Number.isNaN(d.getTime())) {
-            formattedDate = new Intl.DateTimeFormat("tr-TR", {
+            formattedDate = new Intl.DateTimeFormat(isEn ? "en-GB" : "tr-TR", {
               timeZone: "Europe/Istanbul",
               day: "2-digit",
               month: "short",
@@ -2176,7 +2816,7 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
           }
         } catch (e) {
         }
-        const sourceLabel = entry.source === "github" ? "GitHub Sync" : entry.source === "local" ? "Yerel Sync" : "\xD6nceki Sync Kayd\u0131";
+        const sourceLabel = entry.source === "github" ? "GitHub Sync" : entry.source === "local" ? isEn ? "Local Sync" : "Yerel Sync" : isEn ? "Past Sync Snapshot" : "\xD6nceki Sync Kayd\u0131";
         leftTitle.setText(`\u{1F4C5} ${formattedDate} \u2014 ${sourceLabel}`);
         const badgesWrap = summaryEl.createSpan();
         badgesWrap.style.display = "inline-flex";
@@ -2202,29 +2842,53 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
           failed: 0
         };
         if (st.created > 0) {
-          makeBadge(`+${st.created} eklendi`, "rgba(46, 160, 67, 0.2)", "var(--text-success, #3fb950)");
+          makeBadge(
+            isEn ? `+${st.created} added` : `+${st.created} eklendi`,
+            "rgba(46, 160, 67, 0.2)",
+            "var(--text-success, #3fb950)"
+          );
         }
         if (st.updated > 0) {
-          makeBadge(`\u21BB ${st.updated} g\xFCncellendi`, "rgba(56, 139, 253, 0.2)", "var(--text-accent)");
+          makeBadge(
+            isEn ? `\u21BB ${st.updated} updated` : `\u21BB ${st.updated} g\xFCncellendi`,
+            "rgba(56, 139, 253, 0.2)",
+            "var(--text-accent)"
+          );
         }
         if (st.moved > 0) {
-          makeBadge(`\u21AA ${st.moved} ta\u015F\u0131nd\u0131`, "rgba(210, 153, 34, 0.2)", "var(--text-warning, #d29922)");
+          makeBadge(
+            isEn ? `\u21AA ${st.moved} moved` : `\u21AA ${st.moved} ta\u015F\u0131nd\u0131`,
+            "rgba(210, 153, 34, 0.2)",
+            "var(--text-warning, #d29922)"
+          );
         }
         if ((st.slidesDownloaded || 0) + (st.slidesReplaced || 0) > 0) {
           makeBadge(
-            `\u{1F4CA} ${(st.slidesDownloaded || 0) + (st.slidesReplaced || 0)} slayt`,
+            isEn ? `\u{1F4CA} ${(st.slidesDownloaded || 0) + (st.slidesReplaced || 0)} slides` : `\u{1F4CA} ${(st.slidesDownloaded || 0) + (st.slidesReplaced || 0)} slayt`,
             "rgba(163, 113, 247, 0.2)",
             "var(--text-accent)"
           );
         }
         if (st.filtered > 0) {
-          makeBadge(`\u{1F6E1}\uFE0F ${st.filtered} filtrelendi`, "var(--background-modifier-hover)", "var(--text-muted)");
+          makeBadge(
+            isEn ? `\u{1F6E1}\uFE0F ${st.filtered} filtered` : `\u{1F6E1}\uFE0F ${st.filtered} filtrelendi`,
+            "var(--background-modifier-hover)",
+            "var(--text-muted)"
+          );
         }
         if (st.skipped > 0 && entry.items.length === 0) {
-          makeBadge(`\u23ED\uFE0F ${st.skipped} de\u011Fi\u015Fiklik yok`, "var(--background-modifier-hover)", "var(--text-muted)");
+          makeBadge(
+            isEn ? `\u23ED\uFE0F ${st.skipped} unchanged` : `\u23ED\uFE0F ${st.skipped} de\u011Fi\u015Fiklik yok`,
+            "var(--background-modifier-hover)",
+            "var(--text-muted)"
+          );
         }
         if (st.failed > 0) {
-          makeBadge(`\u26A0\uFE0F ${st.failed} hata`, "rgba(248, 81, 73, 0.2)", "var(--text-error)");
+          makeBadge(
+            isEn ? `\u26A0\uFE0F ${st.failed} failed` : `\u26A0\uFE0F ${st.failed} hata`,
+            "rgba(248, 81, 73, 0.2)",
+            "var(--text-error)"
+          );
         }
         const bodyEl = detailsEl.createDiv();
         bodyEl.style.marginTop = "10px";
@@ -2238,7 +2902,7 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
           noChangeEl.style.color = "var(--text-muted)";
           noChangeEl.style.fontSize = "0.88em";
           noChangeEl.setText(
-            `Bu \xE7ekmede yeni veya g\xFCncellenen bir \xF6dev/slayt bulunmad\u0131 (${st.skipped || 0} mevcut \xF6\u011Fe kontrol edildi).`
+            isEn ? `No new or updated assignments/slides in this sync (${st.skipped || 0} existing items checked).` : `Bu \xE7ekmede yeni veya g\xFCncellenen bir \xF6dev/slayt bulunmad\u0131 (${st.skipped || 0} mevcut \xF6\u011Fe kontrol edildi).`
           );
         } else {
           for (const item of entry.items) {
@@ -2282,7 +2946,9 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
                   (_b = (_a = this.app.setting) == null ? void 0 : _a.close) == null ? void 0 : _b.call(_a);
                   await this.app.workspace.getLeaf(false).openFile(target);
                 } else {
-                  new import_obsidian2.Notice(`Dosya bulunamad\u0131 (ta\u015F\u0131nm\u0131\u015F veya silinmi\u015F olabilir): ${item.filePath}`);
+                  new import_obsidian2.Notice(
+                    isEn ? `File not found (may have been moved or deleted): ${item.filePath}` : `Dosya bulunamad\u0131 (ta\u015F\u0131nm\u0131\u015F veya silinmi\u015F olabilir): ${item.filePath}`
+                  );
                 }
               });
             } else {
@@ -2306,7 +2972,7 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
       });
     };
     if (!this.plugin.settings.syncHistory || this.plugin.settings.syncHistory.length === 0) {
-      this.plugin.seedSyncHistoryFromVault(false).then((seeded) => {
+      this.plugin.seedSyncHistoryFromVault(false).then(() => {
         renderHistoryList();
       });
     } else {
