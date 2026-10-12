@@ -510,7 +510,7 @@ odtuclass-course: "${courseName}"
 		} else if (assignment.sectionNumber !== undefined && assignment.sectionNumber !== null) {
 			const parsedSec = parseInt(assignment.sectionNumber, 10);
 			if (!isNaN(parsedSec)) weekNum = parsedSec;
-		} else if (/preliminaries|ch\.?\s*0\b|physics\s+primer|mathematics\s+review|introduction\s+to\s+mastering/i.test(fullText)) {
+		} else if (/preliminaries|ch\.?\s*0\b/i.test(fullText)) {
 			weekNum = 1;
 		} else if (/limit\s+and\s+continuity.*basics/i.test(fullText)) {
 			weekNum = 2;
@@ -523,7 +523,7 @@ odtuclass-course: "${courseName}"
 			}
 		}
 
-		// 2. Check due date and open/start date if available
+		// 2. Check due date and open/start/creation date if available
 		const dueDateStr = assignment.due || assignment.dueDate || assignment.dueAt || '';
 		let dueIso = '';
 		if (dueDateStr) {
@@ -533,7 +533,7 @@ odtuclass-course: "${courseName}"
 			}
 		}
 
-		const openDateStr = assignment.start || assignment.openDate || assignment.openAt || '';
+		const openDateStr = assignment.start || assignment.openDate || assignment.openAt || assignment.createdAt || '';
 		let openIso = '';
 		if (openDateStr) {
 			const d = new Date(openDateStr);
@@ -625,8 +625,10 @@ odtuclass-course: "${courseName}"
 			}
 		}
 
-		// Priority 4: Match by open/start date within section weekStart / weekEnd
+		// Priority 4: Match by open/start/creation date within section weekStart / weekEnd
+		// (or if openIso is before the earliest weekStart of the semester, assign to Week 1)
 		if (openIso) {
+			let earliestSection: { file: TFile; basename: string; title: string; startStr: string } | null = null;
 			for (const cand of candidateSections) {
 				if (cand.fm.weekStart && cand.fm.weekEnd) {
 					const startStr = String(cand.fm.weekStart).slice(0, 10);
@@ -634,7 +636,13 @@ odtuclass-course: "${courseName}"
 					if (openIso >= startStr && openIso <= endStr) {
 						return { file: cand.file, basename: cand.basename, title: cand.title };
 					}
+					if (!earliestSection || startStr < earliestSection.startStr) {
+						earliestSection = { file: cand.file, basename: cand.basename, title: cand.title, startStr };
+					}
 				}
+			}
+			if (earliestSection && openIso < earliestSection.startStr) {
+				return { file: earliestSection.file, basename: earliestSection.basename, title: earliestSection.title };
 			}
 		}
 

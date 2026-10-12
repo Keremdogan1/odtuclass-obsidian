@@ -849,7 +849,7 @@ ${subtasksEndMarker}
       const parsedSec = parseInt(assignment.sectionNumber, 10);
       if (!isNaN(parsedSec))
         weekNum = parsedSec;
-    } else if (/preliminaries|ch\.?\s*0\b|physics\s+primer|mathematics\s+review|introduction\s+to\s+mastering/i.test(fullText)) {
+    } else if (/preliminaries|ch\.?\s*0\b/i.test(fullText)) {
       weekNum = 1;
     } else if (/limit\s+and\s+continuity.*basics/i.test(fullText)) {
       weekNum = 2;
@@ -869,7 +869,7 @@ ${subtasksEndMarker}
         dueIso = this.formatOdtuclassDate(dueDateStr).date;
       }
     }
-    const openDateStr = assignment.start || assignment.openDate || assignment.openAt || "";
+    const openDateStr = assignment.start || assignment.openDate || assignment.openAt || assignment.createdAt || "";
     let openIso = "";
     if (openDateStr) {
       const d = new Date(openDateStr);
@@ -937,6 +937,7 @@ ${subtasksEndMarker}
       }
     }
     if (openIso) {
+      let earliestSection = null;
       for (const cand of candidateSections) {
         if (cand.fm.weekStart && cand.fm.weekEnd) {
           const startStr = String(cand.fm.weekStart).slice(0, 10);
@@ -944,7 +945,13 @@ ${subtasksEndMarker}
           if (openIso >= startStr && openIso <= endStr) {
             return { file: cand.file, basename: cand.basename, title: cand.title };
           }
+          if (!earliestSection || startStr < earliestSection.startStr) {
+            earliestSection = { file: cand.file, basename: cand.basename, title: cand.title, startStr };
+          }
         }
+      }
+      if (earliestSection && openIso < earliestSection.startStr) {
+        return { file: earliestSection.file, basename: earliestSection.basename, title: earliestSection.title };
       }
     }
     if (dueIso) {
