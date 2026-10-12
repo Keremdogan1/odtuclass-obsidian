@@ -201,9 +201,13 @@ async function syncFromGithub(plugin) {
     return;
   }
   let createdCount = 0;
+  let updatedCount = 0;
+  let movedCount = 0;
+  let filteredCount = 0;
   let skipCount = 0;
   let failCount = 0;
   let stateChanged = false;
+  const historyItems = [];
   const sortedItems = [...items].sort((a, b) => {
     const aIsSec = typeof (a == null ? void 0 : a.name) === "string" && a.name.startsWith("section-") ? 0 : 1;
     const bIsSec = typeof (b == null ? void 0 : b.name) === "string" && b.name.startsWith("section-") ? 0 : 1;
@@ -242,7 +246,66 @@ async function syncFromGithub(plugin) {
             continue;
           }
         }
-        await plugin.processAssignment(data, false);
+        const res = await plugin.processAssignment(data, false);
+        if (res) {
+          if (res.action === "filtered") {
+            filteredCount++;
+            historyItems.push({
+              action: "filtered",
+              title: res.title,
+              courseCode: res.courseCode,
+              detail: res.detail || "G\xF6rev d\u0131\u015F\u0131 i\xE7erik filtrelendi"
+            });
+          } else {
+            if (res.action === "created") {
+              createdCount++;
+              historyItems.push({
+                action: "created",
+                title: res.title,
+                courseCode: res.courseCode,
+                parentTitle: res.parentTitle,
+                filePath: res.filePath,
+                detail: res.isSection ? "Haftal\u0131k b\xF6l\xFCm eklendi" : "Yeni \xF6dev/g\xF6rev eklendi"
+              });
+            } else if (res.action === "updated") {
+              updatedCount++;
+              historyItems.push({
+                action: "updated",
+                title: res.title,
+                courseCode: res.courseCode,
+                parentTitle: res.parentTitle,
+                filePath: res.filePath,
+                detail: res.isSection ? "Haftal\u0131k b\xF6l\xFCm g\xFCncellendi" : "\xD6dev/g\xF6rev g\xFCncellendi"
+              });
+            }
+            if (Array.isArray(res.subtasksAdded)) {
+              for (const st of res.subtasksAdded) {
+                createdCount++;
+                historyItems.push({
+                  action: "created",
+                  title: st.title,
+                  courseCode: res.courseCode,
+                  parentTitle: res.title,
+                  filePath: st.filePath,
+                  detail: "Suggested Problems alt g\xF6revi eklendi"
+                });
+              }
+            }
+            if (Array.isArray(res.subtasksMoved)) {
+              for (const mv of res.subtasksMoved) {
+                movedCount++;
+                historyItems.push({
+                  action: "moved",
+                  title: mv.title,
+                  courseCode: res.courseCode,
+                  parentTitle: res.title,
+                  filePath: mv.filePath,
+                  detail: mv.detail || "\xD6nceki haftadan sarkan konu ta\u015F\u0131nd\u0131"
+                });
+              }
+            }
+          }
+        }
         state[realId] = {
           processedAt: new Date().toISOString(),
           ...data.contentHash ? { contentHash: data.contentHash } : {},
@@ -251,7 +314,6 @@ async function syncFromGithub(plugin) {
           ...data.dueAt ? { dueAt: data.dueAt } : {}
         };
         stateChanged = true;
-        createdCount++;
       } catch (e) {
         console.error(`[ODTUClass] Error processing JSON for ${item.name}:`, e.message);
         failCount++;
@@ -261,14 +323,39 @@ async function syncFromGithub(plugin) {
   if (stateChanged) {
     await saveProcessedState(plugin.app.vault.adapter, state);
   }
-  let slideStats = { downloaded: 0, replaced: 0 };
+  let slideStats = {
+    downloaded: 0,
+    replaced: 0,
+    items: []
+  };
   try {
     slideStats = await syncAllCourseSlidesFromGithub(plugin, owner, repo, token);
+    if (Array.isArray(slideStats.items)) {
+      historyItems.push(...slideStats.items);
+    }
   } catch (slideErr) {
     console.warn("[ODTUClass] Error syncing course slides:", slideErr);
   }
+  if (typeof plugin.recordSyncHistory === "function") {
+    await plugin.recordSyncHistory({
+      id: `sync-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      source: "github",
+      stats: {
+        created: createdCount,
+        updated: updatedCount,
+        moved: movedCount,
+        slidesDownloaded: slideStats.downloaded,
+        slidesReplaced: slideStats.replaced,
+        filtered: filteredCount,
+        skipped: skipCount,
+        failed: failCount
+      },
+      items: historyItems
+    });
+  }
   const slideMsg = slideStats.downloaded > 0 || slideStats.replaced > 0 ? ` | Slides: ${slideStats.downloaded} downloaded, ${slideStats.replaced} replaced` : "";
-  new import_obsidian.Notice(`ODTUClass Sync: ${createdCount} updated/created, ${skipCount} skipped, ${failCount} failed${slideMsg}.`);
+  new import_obsidian.Notice(`ODTUClass Sync: ${createdCount + updatedCount} updated/created, ${skipCount} skipped, ${failCount} failed${slideMsg}.`);
 }
 async function fetchSlideManifestFromGithub(owner, repo, token) {
   var _a, _b;
@@ -310,7 +397,7 @@ async function syncAllCourseSlidesFromGithub(plugin, owner, repo, token) {
   const adapter = plugin.app.vault.adapter;
   const manifest = await fetchSlideManifestFromGithub(owner, repo, token);
   if (!manifest || typeof manifest.slides !== "object") {
-    return { downloaded: 0, replaced: 0 };
+    return { downloaded: 0, replaced: 0, items: [] };
   }
   const byCourse = /* @__PURE__ */ new Map();
   for (const slide of Object.values(manifest.slides)) {
@@ -325,6 +412,7 @@ async function syncAllCourseSlidesFromGithub(plugin, owner, repo, token) {
   }
   let downloaded = 0;
   let replaced = 0;
+  const items = [];
   if (!plugin.settings.courseSlideConfigs) {
     plugin.settings.courseSlideConfigs = {};
   }
@@ -394,6 +482,13 @@ async function syncAllCourseSlidesFromGithub(plugin, owner, repo, token) {
           if (isSameNameReplacement) {
             replaced++;
           }
+          items.push({
+            action: "slide",
+            title: targetFilename,
+            courseCode,
+            filePath: targetPath,
+            detail: isSameNameReplacement ? "Slayt g\xFCncellendi" : "Slayt indirildi"
+          });
         }
       }
       if (weekKey && !/pre-?lecture/i.test(targetFilename) && await adapter.exists(targetPath)) {
@@ -424,7 +519,7 @@ async function syncAllCourseSlidesFromGithub(plugin, owner, repo, token) {
       }
     }
   }
-  return { downloaded, replaced };
+  return { downloaded, replaced, items };
 }
 
 // src/main.ts
@@ -443,7 +538,8 @@ var DEFAULT_SETTINGS = {
       targetFolder: "Courses/CENG111/Slides",
       prompted: true
     }
-  }
+  },
+  syncHistory: []
 };
 var ODTUClassPlugin = class extends import_obsidian2.Plugin {
   async onload() {
@@ -462,7 +558,8 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
         this.processPendingAssignments();
       }
     });
-    this.addSettingTab(new ODTUClassSettingTab(this.app, this));
+    this.settingTab = new ODTUClassSettingTab(this.app, this);
+    this.addSettingTab(this.settingTab);
     this.registerEvent(
       this.app.metadataCache.on("changed", async (file) => {
         if (file instanceof import_obsidian2.TFile && file.extension === "md") {
@@ -501,9 +598,147 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
       DEFAULT_SETTINGS.courseSlideConfigs,
       (loaded == null ? void 0 : loaded.courseSlideConfigs) || {}
     );
+    if (!Array.isArray(this.settings.syncHistory)) {
+      this.settings.syncHistory = [];
+    }
   }
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+  async recordSyncHistory(entry) {
+    if (!Array.isArray(this.settings.syncHistory)) {
+      this.settings.syncHistory = [];
+    }
+    this.settings.syncHistory.unshift(entry);
+    if (this.settings.syncHistory.length > 40) {
+      this.settings.syncHistory = this.settings.syncHistory.slice(0, 40);
+    }
+    await this.saveSettings();
+    if (this.settingTab && this.settingTab.containerEl && this.settingTab.containerEl.isShown()) {
+      this.settingTab.display();
+    }
+  }
+  async seedSyncHistoryFromVault(forceRebuild = false) {
+    var _a;
+    if (!forceRebuild && this.settings.syncHistory && this.settings.syncHistory.length > 0) {
+      return 0;
+    }
+    try {
+      const state = await loadProcessedState(this.app.vault.adapter);
+      const entries = Object.entries(state);
+      if (entries.length === 0)
+        return 0;
+      const fileById = /* @__PURE__ */ new Map();
+      const subtasksByParentPrefix = /* @__PURE__ */ new Map();
+      const courseTitleByCourseId = /* @__PURE__ */ new Map();
+      for (const file of this.app.vault.getMarkdownFiles()) {
+        if (!file.path.startsWith(this.settings.outputFolder))
+          continue;
+        const fm = (_a = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _a.frontmatter;
+        if (!fm)
+          continue;
+        if (fm["odtuclass-course-id"] && fm.type === "task") {
+          courseTitleByCourseId.set(String(fm["odtuclass-course-id"]), String(fm.title || file.basename));
+        }
+        if (fm.id) {
+          const idStr = String(fm.id);
+          fileById.set(idStr, { file, fm });
+          const subMatch = idStr.match(/^(section:\d+:\d+):subtask:/);
+          if (subMatch) {
+            const secId = subMatch[1];
+            if (!subtasksByParentPrefix.has(secId)) {
+              subtasksByParentPrefix.set(secId, []);
+            }
+            subtasksByParentPrefix.get(secId).push({ file, fm });
+          }
+        }
+      }
+      const sorted = entries.map(([id, meta]) => ({
+        id,
+        ts: (meta == null ? void 0 : meta.processedAt) ? new Date(meta.processedAt).getTime() : 0,
+        iso: (meta == null ? void 0 : meta.processedAt) || new Date().toISOString()
+      })).filter((e) => e.ts > 0 && fileById.has(e.id)).sort((a, b) => a.ts - b.ts);
+      const clusters = [];
+      const CLUSTER_WINDOW_MS = 3 * 60 * 1e3;
+      for (const item of sorted) {
+        const last = clusters[clusters.length - 1];
+        if (!last || item.ts - last.ts > CLUSTER_WINDOW_MS) {
+          clusters.push({ ts: item.ts, iso: item.iso, ids: [item.id] });
+        } else {
+          last.ids.push(item.id);
+          last.ts = item.ts;
+          last.iso = item.iso;
+        }
+      }
+      const reconstructed = [];
+      for (const cluster of clusters.reverse()) {
+        const historyItems = [];
+        let createdCount = 0;
+        for (const id of cluster.ids) {
+          const match = fileById.get(id);
+          if (!match)
+            continue;
+          const { file, fm } = match;
+          const isSection = id.startsWith("section:");
+          const courseIdPart = id.split(":")[1] || String(fm["odtuclass-course-id"] || "");
+          const courseCode = courseTitleByCourseId.get(courseIdPart) || this.extractCanonicalCourseCode(String(fm.course || fm.parentId || "")) || "ODTUClass";
+          const parentRaw = String(fm.parentId || "");
+          const parentPipe = parentRaw.match(/\[\[.*?\|(.*?)\]\]/) || parentRaw.match(/\[\[(.*?)\]\]/);
+          const parentTitle = parentPipe ? parentPipe[1] : "";
+          createdCount++;
+          historyItems.push({
+            action: "created",
+            title: String(fm.title || file.basename),
+            courseCode,
+            parentTitle,
+            filePath: file.path,
+            detail: isSection ? "Haftal\u0131k b\xF6l\xFCm eklendi" : "\xD6dev/g\xF6rev eklendi"
+          });
+          if (isSection && subtasksByParentPrefix.has(id)) {
+            for (const sub of subtasksByParentPrefix.get(id)) {
+              createdCount++;
+              historyItems.push({
+                action: "created",
+                title: String(sub.fm.title || sub.file.basename),
+                courseCode,
+                parentTitle: String(fm.title || file.basename),
+                filePath: sub.file.path,
+                detail: "Suggested Problems alt g\xF6revi eklendi"
+              });
+            }
+          }
+        }
+        if (historyItems.length > 0) {
+          reconstructed.push({
+            id: `snapshot-${cluster.ts}`,
+            timestamp: cluster.iso,
+            source: "snapshot",
+            stats: {
+              created: createdCount,
+              updated: 0,
+              moved: 0,
+              slidesDownloaded: 0,
+              slidesReplaced: 0,
+              filtered: 0,
+              skipped: 0,
+              failed: 0
+            },
+            items: historyItems
+          });
+        }
+      }
+      if (forceRebuild) {
+        const nonSnapshots = (this.settings.syncHistory || []).filter((h) => h.source !== "snapshot");
+        this.settings.syncHistory = [...nonSnapshots, ...reconstructed].slice(0, 40);
+      } else {
+        this.settings.syncHistory = reconstructed.slice(0, 40);
+      }
+      await this.saveSettings();
+      return reconstructed.length;
+    } catch (e) {
+      console.warn("[ODTUClass] Could not seed sync history from vault:", e);
+      return 0;
+    }
   }
   async processPendingAssignments() {
     const pendingDir = ".odtuclass/pending";
@@ -519,6 +754,12 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
       return;
     }
     let processedCount = 0;
+    let createdCount = 0;
+    let updatedCount = 0;
+    let movedCount = 0;
+    let filteredCount = 0;
+    let failCount = 0;
+    const historyItems = [];
     if (!this.app.vault.getAbstractFileByPath(this.settings.outputFolder)) {
       try {
         await this.createFolderRecursive(this.settings.outputFolder);
@@ -532,13 +773,91 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
       try {
         const content = await this.app.vault.adapter.read(filePath);
         const assignment = JSON.parse(content);
-        await this.processAssignment(assignment);
+        const res = await this.processAssignment(assignment);
+        if (res) {
+          if (res.action === "filtered") {
+            filteredCount++;
+            historyItems.push({
+              action: "filtered",
+              title: res.title,
+              courseCode: res.courseCode,
+              detail: res.detail
+            });
+          } else {
+            if (res.action === "created") {
+              createdCount++;
+              historyItems.push({
+                action: "created",
+                title: res.title,
+                courseCode: res.courseCode,
+                parentTitle: res.parentTitle,
+                filePath: res.filePath,
+                detail: res.isSection ? "Haftal\u0131k b\xF6l\xFCm eklendi" : "Yeni \xF6dev/g\xF6rev eklendi"
+              });
+            } else if (res.action === "updated") {
+              updatedCount++;
+              historyItems.push({
+                action: "updated",
+                title: res.title,
+                courseCode: res.courseCode,
+                parentTitle: res.parentTitle,
+                filePath: res.filePath,
+                detail: res.isSection ? "Haftal\u0131k b\xF6l\xFCm g\xFCncellendi" : "\xD6dev/g\xF6rev g\xFCncellendi"
+              });
+            }
+            if (Array.isArray(res.subtasksAdded)) {
+              for (const st of res.subtasksAdded) {
+                createdCount++;
+                historyItems.push({
+                  action: "created",
+                  title: st.title,
+                  courseCode: res.courseCode,
+                  parentTitle: res.title,
+                  filePath: st.filePath,
+                  detail: "Suggested Problems alt g\xF6revi eklendi"
+                });
+              }
+            }
+            if (Array.isArray(res.subtasksMoved)) {
+              for (const mv of res.subtasksMoved) {
+                movedCount++;
+                historyItems.push({
+                  action: "moved",
+                  title: mv.title,
+                  courseCode: res.courseCode,
+                  parentTitle: res.title,
+                  filePath: mv.filePath,
+                  detail: mv.detail
+                });
+              }
+            }
+          }
+        }
         await this.app.vault.adapter.remove(filePath);
         processedCount++;
       } catch (error) {
+        failCount++;
         console.error(`Failed to process assignment file ${filePath}:`, error);
         new import_obsidian2.Notice(`Failed to process assignment: ${filePath}. Check console for details.`);
       }
+    }
+    if (processedCount > 0 || failCount > 0) {
+      await this.recordSyncHistory({
+        id: `local-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        source: "local",
+        stats: {
+          created: createdCount,
+          updated: updatedCount,
+          moved: movedCount,
+          slidesDownloaded: 0,
+          slidesReplaced: 0,
+          filtered: filteredCount,
+          skipped: 0,
+          failed: failCount
+        },
+        items: historyItems
+      });
     }
     if (processedCount > 0) {
       new import_obsidian2.Notice(`Successfully processed ${processedCount} assignment(s).`);
@@ -1051,7 +1370,12 @@ ${fmText}
   }
   async processAssignment(assignment, skipIfExists = false) {
     if (this.isNonTaskPayload(assignment)) {
-      return;
+      return {
+        action: "filtered",
+        title: String((assignment == null ? void 0 : assignment.title) || "Untitled"),
+        courseCode: this.extractCanonicalCourseCode(assignment == null ? void 0 : assignment.courseName) || "ODTUClass",
+        detail: "G\xF6rev d\u0131\u015F\u0131 i\xE7erik filtrelendi (duyuru / yoklama / \xE7\xF6z\xFCml\xFC sorular)"
+      };
     }
     const courseTask = await this.getOrCreateCourseTask(assignment.courseId, assignment.courseName);
     const isSection = assignment.type === "section";
@@ -1109,6 +1433,8 @@ ${fmText}
       }
     }
     let targetFile;
+    let action = existingFile ? "unchanged" : "created";
+    let subtaskResult = { added: [], moved: [] };
     if (existingFile) {
       targetFile = existingFile;
       if (isSection) {
@@ -1121,7 +1447,7 @@ ${fmText}
           console.warn(
             `Section file ${existingFile.path} is missing valid ODTUCLASS markers. Skipping update.`
           );
-          return;
+          return null;
         }
         const renderedBeginIndex = renderedContent.indexOf(beginMarker);
         const renderedEndIndex = renderedContent.indexOf(endMarker);
@@ -1149,9 +1475,12 @@ ${fmText}
           updatedContent = updatedContent.replace(/^type:\s*.*$/m, `type: "subtask"
 parentId: "${parentLink}"`);
         }
-        await this.app.vault.modify(existingFile, updatedContent);
+        if (updatedContent !== existingContent) {
+          await this.app.vault.modify(existingFile, updatedContent);
+          action = "updated";
+        }
         if (assignment.suggestedProblems && Array.isArray(assignment.suggestedProblems) && assignment.suggestedProblems.length > 0) {
-          await this.processSubtasks(assignment, existingFile, cleanTitle);
+          subtaskResult = await this.processSubtasks(assignment, existingFile, cleanTitle);
         }
       } else {
         if (!skipIfExists) {
@@ -1226,6 +1555,7 @@ ${descEnd}`
           }
           if (updatedContent !== existingContent) {
             await this.app.vault.modify(existingFile, updatedContent);
+            action = "updated";
           }
         }
       }
@@ -1244,17 +1574,30 @@ $&`);
         initialContent = initialContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1Devam Ediyor`);
       }
       targetFile = await this.app.vault.create(outputPath, initialContent);
+      action = "created";
       if (isSection && assignment.suggestedProblems && Array.isArray(assignment.suggestedProblems) && assignment.suggestedProblems.length > 0) {
-        await this.processSubtasks(assignment, targetFile, cleanTitle);
+        subtaskResult = await this.processSubtasks(assignment, targetFile, cleanTitle);
       }
     }
     await this.linkChildToParent(parentTask.file, {
       basename: targetFile.basename,
       title: cleanTitle
     });
+    return {
+      action,
+      title: cleanTitle,
+      courseCode: courseTask.title,
+      parentTitle: parentTask.title,
+      filePath: targetFile.path,
+      isSection,
+      subtasksAdded: subtaskResult.added,
+      subtasksMoved: subtaskResult.moved
+    };
   }
   async processSubtasks(assignment, parentFile, parentCleanTitle) {
     var _a, _b, _c, _d, _e, _f;
+    const added = [];
+    const moved = [];
     const subtaskTemplatePath = `${this.settings.templateFolder}/Subtask.md`;
     const subtaskTemplateFile = this.app.vault.getAbstractFileByPath(subtaskTemplatePath);
     let subtaskTemplateContent = "";
@@ -1322,6 +1665,7 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
       const rawProblemSet = new Set(rawProblems);
       const earlierProblems = /* @__PURE__ */ new Set();
       const carriedOverChecked = /* @__PURE__ */ new Set();
+      let carriedFromEarlierWeek = null;
       let skipBecauseCarriedToLaterWeek = false;
       let hasTitleCollision = false;
       for (const f of this.app.vault.getMarkdownFiles()) {
@@ -1355,6 +1699,7 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
             if (!otherIsDone && isCarriedOverSubset) {
               for (const cp of otherChecked)
                 carriedOverChecked.add(cp);
+              carriedFromEarlierWeek = otherWeekNum !== null ? `Week ${otherWeekNum}` : "\xF6nceki hafta";
               const otherSectionId = fmId.split(":")[2];
               const otherParentId = `section:${assignment.courseId}:${otherSectionId}`;
               for (const pf of this.app.vault.getMarkdownFiles()) {
@@ -1406,8 +1751,21 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
         const regex = new RegExp(`\\{\\{${key}\\}\\}`, "g");
         renderedSubtask = renderedSubtask.replace(regex, String((_f = subtaskData[key]) != null ? _f : ""));
       }
+      const finalSubtaskPath = existingSubtask ? existingSubtask.path : subtaskPath;
       if (!existingSubtask) {
         await this.app.vault.create(subtaskPath, renderedSubtask);
+        if (carriedFromEarlierWeek) {
+          moved.push({
+            title: subtaskTitle,
+            filePath: subtaskPath,
+            detail: `${carriedFromEarlierWeek} \u2192 ${weekPrefixMatch ? weekPrefixMatch[1] : parentTitle} (Sarkan Konu ta\u015F\u0131nd\u0131)`
+          });
+        } else {
+          added.push({
+            title: subtaskTitle,
+            filePath: subtaskPath
+          });
+        }
       } else {
         const subContent = await this.app.vault.read(existingSubtask);
         const expectedParentLink = `[[${parentBaseName}|${parentTitle}]]`;
@@ -1421,6 +1779,13 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
         if (mergedContent !== subContent) {
           await this.app.vault.modify(existingSubtask, mergedContent);
         }
+        if (carriedFromEarlierWeek) {
+          moved.push({
+            title: subtaskTitle,
+            filePath: finalSubtaskPath,
+            detail: `${carriedFromEarlierWeek} \u2192 ${weekPrefixMatch ? weekPrefixMatch[1] : parentTitle} (Sarkan Konu ta\u015F\u0131nd\u0131)`
+          });
+        }
       }
       subtaskRefs.push({
         basename: existingSubtask ? existingSubtask.basename : fullSubtaskBasename,
@@ -1430,6 +1795,7 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
     if (subtaskRefs.length > 0) {
       await this.linkSubtasksInParent(parentFile, subtaskRefs);
     }
+    return { added, moved };
   }
   async linkSubtasksInParent(parentFile, subtaskRefs) {
     for (const ref of subtaskRefs) {
@@ -1748,5 +2114,203 @@ var ODTUClassSettingTab = class extends import_obsidian2.PluginSettingTab {
       await this.plugin.saveSettings();
       this.display();
     }));
+    containerEl.createEl("h3", { text: "\u{1F552} Senkronizasyon Ge\xE7mi\u015Fi (Sync History)" });
+    new import_obsidian2.Setting(containerEl).setName("\xC7ekme ve G\xF6rev Ge\xE7mi\u015Fi").setDesc("Her senkronizasyonda hangi ders/hafta alt\u0131na hangi \xF6devlerin, alt g\xF6revlerin veya slaytlar\u0131n eklendi\u011Fini g\xF6sterir.").addButton((btn) => btn.setButtonText("Vault'tan Ge\xE7mi\u015Fi Yenile").setTooltip("processed.json ve mevcut g\xF6rev dosyalar\u0131ndan ge\xE7mi\u015F kay\u0131tlar\u0131 yeniden olu\u015Fturur").onClick(async () => {
+      const count = await this.plugin.seedSyncHistoryFromVault(true);
+      this.display();
+      new import_obsidian2.Notice(`Senkronizasyon ge\xE7mi\u015Fi yenilendi (${count} ge\xE7mi\u015F oturum bulundu).`);
+    })).addButton((btn) => btn.setButtonText("Ge\xE7mi\u015Fi Temizle").setWarning().onClick(async () => {
+      this.plugin.settings.syncHistory = [];
+      await this.plugin.saveSettings();
+      this.display();
+      new import_obsidian2.Notice("Senkronizasyon ge\xE7mi\u015Fi temizlendi.");
+    }));
+    const historyContainer = containerEl.createDiv({ cls: "odtuclass-sync-history-container" });
+    historyContainer.style.display = "flex";
+    historyContainer.style.flexDirection = "column";
+    historyContainer.style.gap = "10px";
+    historyContainer.style.marginTop = "8px";
+    const renderHistoryList = () => {
+      historyContainer.empty();
+      const history = this.plugin.settings.syncHistory || [];
+      if (history.length === 0) {
+        const emptyEl = historyContainer.createDiv();
+        emptyEl.style.padding = "12px 14px";
+        emptyEl.style.borderRadius = "8px";
+        emptyEl.style.background = "var(--background-secondary)";
+        emptyEl.style.color = "var(--text-muted)";
+        emptyEl.style.fontSize = "0.9em";
+        emptyEl.setText(`Hen\xFCz kaydedilmi\u015F bir senkronizasyon ge\xE7mi\u015Fi yok. "Sync ODTUClass" veya "Vault'tan Ge\xE7mi\u015Fi Yenile" butonuna t\u0131klayabilirsiniz.`);
+        return;
+      }
+      history.forEach((entry, idx) => {
+        const detailsEl = historyContainer.createEl("details");
+        if (idx === 0) {
+          detailsEl.open = true;
+        }
+        detailsEl.style.border = "1px solid var(--background-modifier-border)";
+        detailsEl.style.borderRadius = "8px";
+        detailsEl.style.background = "var(--background-secondary)";
+        detailsEl.style.padding = "8px 12px";
+        const summaryEl = detailsEl.createEl("summary");
+        summaryEl.style.cursor = "pointer";
+        summaryEl.style.display = "flex";
+        summaryEl.style.flexWrap = "wrap";
+        summaryEl.style.alignItems = "center";
+        summaryEl.style.justifyContent = "space-between";
+        summaryEl.style.gap = "8px";
+        summaryEl.style.fontWeight = "600";
+        const leftTitle = summaryEl.createSpan();
+        let formattedDate = entry.timestamp;
+        try {
+          const d = new Date(entry.timestamp);
+          if (!Number.isNaN(d.getTime())) {
+            formattedDate = new Intl.DateTimeFormat("tr-TR", {
+              timeZone: "Europe/Istanbul",
+              day: "2-digit",
+              month: "short",
+              year: "numeric",
+              hour: "2-digit",
+              minute: "2-digit"
+            }).format(d);
+          }
+        } catch (e) {
+        }
+        const sourceLabel = entry.source === "github" ? "GitHub Sync" : entry.source === "local" ? "Yerel Sync" : "\xD6nceki Sync Kayd\u0131";
+        leftTitle.setText(`\u{1F4C5} ${formattedDate} \u2014 ${sourceLabel}`);
+        const badgesWrap = summaryEl.createSpan();
+        badgesWrap.style.display = "inline-flex";
+        badgesWrap.style.flexWrap = "wrap";
+        badgesWrap.style.gap = "6px";
+        badgesWrap.style.fontSize = "0.8em";
+        badgesWrap.style.fontWeight = "500";
+        const makeBadge = (text, bg, color) => {
+          const b = badgesWrap.createSpan({ text });
+          b.style.padding = "2px 8px";
+          b.style.borderRadius = "999px";
+          b.style.background = bg;
+          b.style.color = color;
+        };
+        const st = entry.stats || {
+          created: 0,
+          updated: 0,
+          moved: 0,
+          slidesDownloaded: 0,
+          slidesReplaced: 0,
+          filtered: 0,
+          skipped: 0,
+          failed: 0
+        };
+        if (st.created > 0) {
+          makeBadge(`+${st.created} eklendi`, "rgba(46, 160, 67, 0.2)", "var(--text-success, #3fb950)");
+        }
+        if (st.updated > 0) {
+          makeBadge(`\u21BB ${st.updated} g\xFCncellendi`, "rgba(56, 139, 253, 0.2)", "var(--text-accent)");
+        }
+        if (st.moved > 0) {
+          makeBadge(`\u21AA ${st.moved} ta\u015F\u0131nd\u0131`, "rgba(210, 153, 34, 0.2)", "var(--text-warning, #d29922)");
+        }
+        if ((st.slidesDownloaded || 0) + (st.slidesReplaced || 0) > 0) {
+          makeBadge(
+            `\u{1F4CA} ${(st.slidesDownloaded || 0) + (st.slidesReplaced || 0)} slayt`,
+            "rgba(163, 113, 247, 0.2)",
+            "var(--text-accent)"
+          );
+        }
+        if (st.filtered > 0) {
+          makeBadge(`\u{1F6E1}\uFE0F ${st.filtered} filtrelendi`, "var(--background-modifier-hover)", "var(--text-muted)");
+        }
+        if (st.skipped > 0 && entry.items.length === 0) {
+          makeBadge(`\u23ED\uFE0F ${st.skipped} de\u011Fi\u015Fiklik yok`, "var(--background-modifier-hover)", "var(--text-muted)");
+        }
+        if (st.failed > 0) {
+          makeBadge(`\u26A0\uFE0F ${st.failed} hata`, "rgba(248, 81, 73, 0.2)", "var(--text-error)");
+        }
+        const bodyEl = detailsEl.createDiv();
+        bodyEl.style.marginTop = "10px";
+        bodyEl.style.paddingTop = "8px";
+        bodyEl.style.borderTop = "1px solid var(--background-modifier-border)";
+        bodyEl.style.display = "flex";
+        bodyEl.style.flexDirection = "column";
+        bodyEl.style.gap = "6px";
+        if (!entry.items || entry.items.length === 0) {
+          const noChangeEl = bodyEl.createDiv();
+          noChangeEl.style.color = "var(--text-muted)";
+          noChangeEl.style.fontSize = "0.88em";
+          noChangeEl.setText(
+            `Bu \xE7ekmede yeni veya g\xFCncellenen bir \xF6dev/slayt bulunmad\u0131 (${st.skipped || 0} mevcut \xF6\u011Fe kontrol edildi).`
+          );
+        } else {
+          for (const item of entry.items) {
+            const row = bodyEl.createDiv();
+            row.style.display = "flex";
+            row.style.flexWrap = "wrap";
+            row.style.alignItems = "baseline";
+            row.style.gap = "6px";
+            row.style.fontSize = "0.88em";
+            row.style.padding = "3px 4px";
+            row.style.borderRadius = "4px";
+            const iconMap = {
+              created: "\u2705",
+              updated: "\u{1F504}",
+              moved: "\u21AA",
+              slide: "\u{1F4CA}",
+              filtered: "\u{1F6E1}\uFE0F"
+            };
+            row.createSpan({ text: iconMap[item.action] || "\u2022" });
+            if (item.courseCode) {
+              const courseBadge = row.createSpan({ text: item.courseCode });
+              courseBadge.style.fontSize = "0.82em";
+              courseBadge.style.fontWeight = "600";
+              courseBadge.style.padding = "1px 6px";
+              courseBadge.style.borderRadius = "4px";
+              courseBadge.style.background = "var(--background-primary)";
+              courseBadge.style.border = "1px solid var(--background-modifier-border)";
+            }
+            if (item.filePath) {
+              const linkEl = row.createEl("a", {
+                text: item.title,
+                href: "#"
+              });
+              linkEl.style.fontWeight = "500";
+              linkEl.style.cursor = "pointer";
+              linkEl.addEventListener("click", async (ev) => {
+                var _a, _b;
+                ev.preventDefault();
+                const target = this.app.vault.getAbstractFileByPath(item.filePath);
+                if (target && target instanceof import_obsidian2.TFile) {
+                  (_b = (_a = this.app.setting) == null ? void 0 : _a.close) == null ? void 0 : _b.call(_a);
+                  await this.app.workspace.getLeaf(false).openFile(target);
+                } else {
+                  new import_obsidian2.Notice(`Dosya bulunamad\u0131 (ta\u015F\u0131nm\u0131\u015F veya silinmi\u015F olabilir): ${item.filePath}`);
+                }
+              });
+            } else {
+              const titleSpan = row.createSpan({ text: item.title });
+              titleSpan.style.fontWeight = "500";
+            }
+            const metaParts = [];
+            if (item.parentTitle && item.parentTitle !== item.courseCode) {
+              metaParts.push(`\u2192 ${item.parentTitle}`);
+            }
+            if (item.detail) {
+              metaParts.push(item.detail);
+            }
+            if (metaParts.length > 0) {
+              const metaSpan = row.createSpan({ text: `(${metaParts.join(" \u2022 ")})` });
+              metaSpan.style.color = "var(--text-muted)";
+              metaSpan.style.fontSize = "0.85em";
+            }
+          }
+        }
+      });
+    };
+    if (!this.plugin.settings.syncHistory || this.plugin.settings.syncHistory.length === 0) {
+      this.plugin.seedSyncHistoryFromVault(false).then((seeded) => {
+        renderHistoryList();
+      });
+    } else {
+      renderHistoryList();
+    }
   }
 };

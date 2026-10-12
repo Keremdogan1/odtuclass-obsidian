@@ -18,6 +18,32 @@ export interface CourseSlideConfig {
 	prompted?: boolean;
 }
 
+export interface SyncHistoryItem {
+	action: 'created' | 'updated' | 'moved' | 'slide' | 'filtered';
+	title: string;
+	courseCode?: string;
+	parentTitle?: string;
+	filePath?: string;
+	detail?: string;
+}
+
+export interface SyncHistoryEntry {
+	id: string;
+	timestamp: string;
+	source: 'github' | 'local' | 'snapshot';
+	stats: {
+		created: number;
+		updated: number;
+		moved: number;
+		slidesDownloaded: number;
+		slidesReplaced: number;
+		filtered: number;
+		skipped: number;
+		failed: number;
+	};
+	items: SyncHistoryItem[];
+}
+
 export function formatStandardSlideFilename(slide: {
 	filename: string;
 	formattedFilename?: string | null;
@@ -248,9 +274,13 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 		return;
 	}
 	let createdCount = 0;
+	let updatedCount = 0;
+	let movedCount = 0;
+	let filteredCount = 0;
 	let skipCount = 0;
 	let failCount = 0;
 	let stateChanged = false;
+	const historyItems: SyncHistoryItem[] = [];
 
 	const sortedItems = [...items].sort((a: any, b: any) => {
 		const aIsSec = typeof a?.name === 'string' && a.name.startsWith('section-') ? 0 : 1;
@@ -297,7 +327,66 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 					}
 				}
 
-				await plugin.processAssignment(data, false);
+				const res = await plugin.processAssignment(data, false);
+				if (res) {
+					if (res.action === 'filtered') {
+						filteredCount++;
+						historyItems.push({
+							action: 'filtered',
+							title: res.title,
+							courseCode: res.courseCode,
+							detail: res.detail || 'Görev dışı içerik filtrelendi'
+						});
+					} else {
+						if (res.action === 'created') {
+							createdCount++;
+							historyItems.push({
+								action: 'created',
+								title: res.title,
+								courseCode: res.courseCode,
+								parentTitle: res.parentTitle,
+								filePath: res.filePath,
+								detail: res.isSection ? 'Haftalık bölüm eklendi' : 'Yeni ödev/görev eklendi'
+							});
+						} else if (res.action === 'updated') {
+							updatedCount++;
+							historyItems.push({
+								action: 'updated',
+								title: res.title,
+								courseCode: res.courseCode,
+								parentTitle: res.parentTitle,
+								filePath: res.filePath,
+								detail: res.isSection ? 'Haftalık bölüm güncellendi' : 'Ödev/görev güncellendi'
+							});
+						}
+						if (Array.isArray(res.subtasksAdded)) {
+							for (const st of res.subtasksAdded) {
+								createdCount++;
+								historyItems.push({
+									action: 'created',
+									title: st.title,
+									courseCode: res.courseCode,
+									parentTitle: res.title,
+									filePath: st.filePath,
+									detail: 'Suggested Problems alt görevi eklendi'
+								});
+							}
+						}
+						if (Array.isArray(res.subtasksMoved)) {
+							for (const mv of res.subtasksMoved) {
+								movedCount++;
+								historyItems.push({
+									action: 'moved',
+									title: mv.title,
+									courseCode: res.courseCode,
+									parentTitle: res.title,
+									filePath: mv.filePath,
+									detail: mv.detail || 'Önceki haftadan sarkan konu taşındı'
+								});
+							}
+						}
+					}
+				}
 
 				state[realId] = {
 					processedAt: new Date().toISOString(),
@@ -307,7 +396,6 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 					...(data.dueAt ? { dueAt: data.dueAt } : {})
 				};
 				stateChanged = true;
-				createdCount++;
 
 			} catch (e) {
 				console.error(`[ODTUClass] Error processing JSON for ${item.name}:`, e.message);
@@ -320,11 +408,37 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 		await saveProcessedState(plugin.app.vault.adapter, state);
 	}
 
-	let slideStats = { downloaded: 0, replaced: 0 };
+	let slideStats: { downloaded: number; replaced: number; items: SyncHistoryItem[] } = {
+		downloaded: 0,
+		replaced: 0,
+		items: []
+	};
 	try {
 		slideStats = await syncAllCourseSlidesFromGithub(plugin, owner, repo, token);
+		if (Array.isArray(slideStats.items)) {
+			historyItems.push(...slideStats.items);
+		}
 	} catch (slideErr) {
 		console.warn("[ODTUClass] Error syncing course slides:", slideErr);
+	}
+
+	if (typeof plugin.recordSyncHistory === 'function') {
+		await plugin.recordSyncHistory({
+			id: `sync-${Date.now()}`,
+			timestamp: new Date().toISOString(),
+			source: 'github',
+			stats: {
+				created: createdCount,
+				updated: updatedCount,
+				moved: movedCount,
+				slidesDownloaded: slideStats.downloaded,
+				slidesReplaced: slideStats.replaced,
+				filtered: filteredCount,
+				skipped: skipCount,
+				failed: failCount
+			},
+			items: historyItems
+		});
 	}
 
 	const slideMsg =
@@ -332,7 +446,7 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 			? ` | Slides: ${slideStats.downloaded} downloaded, ${slideStats.replaced} replaced`
 			: '';
 
-	new Notice(`ODTUClass Sync: ${createdCount} updated/created, ${skipCount} skipped, ${failCount} failed${slideMsg}.`);
+	new Notice(`ODTUClass Sync: ${createdCount + updatedCount} updated/created, ${skipCount} skipped, ${failCount} failed${slideMsg}.`);
 }
 
 export async function fetchSlideManifestFromGithub(
@@ -382,12 +496,12 @@ export async function syncAllCourseSlidesFromGithub(
 	owner: string,
 	repo: string,
 	token: string
-): Promise<{ downloaded: number; replaced: number }> {
+): Promise<{ downloaded: number; replaced: number; items: SyncHistoryItem[] }> {
 	const adapter = plugin.app.vault.adapter;
 	const manifest = await fetchSlideManifestFromGithub(owner, repo, token);
 
 	if (!manifest || typeof manifest.slides !== 'object') {
-		return { downloaded: 0, replaced: 0 };
+		return { downloaded: 0, replaced: 0, items: [] };
 	}
 
 	// Group slides by courseCode
@@ -404,6 +518,7 @@ export async function syncAllCourseSlidesFromGithub(
 
 	let downloaded = 0;
 	let replaced = 0;
+	const items: SyncHistoryItem[] = [];
 
 	if (!plugin.settings.courseSlideConfigs) {
 		plugin.settings.courseSlideConfigs = {};
@@ -495,6 +610,13 @@ export async function syncAllCourseSlidesFromGithub(
 					if (isSameNameReplacement) {
 						replaced++;
 					}
+					items.push({
+						action: 'slide',
+						title: targetFilename,
+						courseCode,
+						filePath: targetPath,
+						detail: isSameNameReplacement ? 'Slayt güncellendi' : 'Slayt indirildi'
+					});
 				}
 			}
 
@@ -535,5 +657,5 @@ export async function syncAllCourseSlidesFromGithub(
 		}
 	}
 
-	return { downloaded, replaced };
+	return { downloaded, replaced, items };
 }

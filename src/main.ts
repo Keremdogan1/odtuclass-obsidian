@@ -1,5 +1,12 @@
 import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder } from 'obsidian';
-import { CourseSlideConfig, fetchSlideManifestFromGithub, syncFromGithub } from './githubSync';
+import {
+	CourseSlideConfig,
+	SyncHistoryEntry,
+	SyncHistoryItem,
+	fetchSlideManifestFromGithub,
+	loadProcessedState,
+	syncFromGithub
+} from './githubSync';
 
 interface ODTUClassSettings {
 	outputFolder: string;
@@ -9,6 +16,7 @@ interface ODTUClassSettings {
 	githubToken: string;
 	autoFormatSlideNames: boolean;
 	courseSlideConfigs: Record<string, CourseSlideConfig>;
+	syncHistory: SyncHistoryEntry[];
 }
 
 const DEFAULT_SETTINGS: ODTUClassSettings = {
@@ -26,7 +34,8 @@ const DEFAULT_SETTINGS: ODTUClassSettings = {
 			targetFolder: 'Courses/CENG111/Slides',
 			prompted: true
 		}
-	}
+	},
+	syncHistory: []
 }
 
 interface NormalizedDates {
@@ -36,6 +45,7 @@ interface NormalizedDates {
 
 export default class ODTUClassPlugin extends Plugin {
 	settings: ODTUClassSettings;
+	settingTab?: ODTUClassSettingTab;
 
 	async onload() {
 		await this.loadSettings();
@@ -56,7 +66,8 @@ export default class ODTUClassPlugin extends Plugin {
 			}
 		});
 
-		this.addSettingTab(new ODTUClassSettingTab(this.app, this));
+		this.settingTab = new ODTUClassSettingTab(this.app, this);
+		this.addSettingTab(this.settingTab);
 
 		this.registerEvent(
 			this.app.metadataCache.on('changed', async (file) => {
@@ -99,10 +110,163 @@ export default class ODTUClassPlugin extends Plugin {
 			DEFAULT_SETTINGS.courseSlideConfigs,
 			loaded?.courseSlideConfigs || {}
 		);
+		if (!Array.isArray(this.settings.syncHistory)) {
+			this.settings.syncHistory = [];
+		}
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+	}
+
+	async recordSyncHistory(entry: SyncHistoryEntry) {
+		if (!Array.isArray(this.settings.syncHistory)) {
+			this.settings.syncHistory = [];
+		}
+		this.settings.syncHistory.unshift(entry);
+		if (this.settings.syncHistory.length > 40) {
+			this.settings.syncHistory = this.settings.syncHistory.slice(0, 40);
+		}
+		await this.saveSettings();
+		if (this.settingTab && this.settingTab.containerEl && this.settingTab.containerEl.isShown()) {
+			this.settingTab.display();
+		}
+	}
+
+	async seedSyncHistoryFromVault(forceRebuild: boolean = false): Promise<number> {
+		if (!forceRebuild && this.settings.syncHistory && this.settings.syncHistory.length > 0) {
+			return 0;
+		}
+		try {
+			const state = await loadProcessedState(this.app.vault.adapter);
+			const entries = Object.entries(state);
+			if (entries.length === 0) return 0;
+
+			// Map vault markdown files by frontmatter id and basename
+			const fileById = new Map<string, { file: TFile; fm: any }>();
+			const subtasksByParentPrefix = new Map<string, Array<{ file: TFile; fm: any }>>();
+			const courseTitleByCourseId = new Map<string, string>();
+
+			for (const file of this.app.vault.getMarkdownFiles()) {
+				if (!file.path.startsWith(this.settings.outputFolder)) continue;
+				const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+				if (!fm) continue;
+				if (fm['odtuclass-course-id'] && fm.type === 'task') {
+					courseTitleByCourseId.set(String(fm['odtuclass-course-id']), String(fm.title || file.basename));
+				}
+				if (fm.id) {
+					const idStr = String(fm.id);
+					fileById.set(idStr, { file, fm });
+					const subMatch = idStr.match(/^(section:\d+:\d+):subtask:/);
+					if (subMatch) {
+						const secId = subMatch[1];
+						if (!subtasksByParentPrefix.has(secId)) {
+							subtasksByParentPrefix.set(secId, []);
+						}
+						subtasksByParentPrefix.get(secId)!.push({ file, fm });
+					}
+				}
+			}
+
+			// Sort processed entries by timestamp ascending so we can cluster into sync runs (within 3 minutes)
+			const sorted = entries
+				.map(([id, meta]) => ({
+					id,
+					ts: meta?.processedAt ? new Date(meta.processedAt).getTime() : 0,
+					iso: meta?.processedAt || new Date().toISOString()
+				}))
+				.filter((e) => e.ts > 0 && fileById.has(e.id))
+				.sort((a, b) => a.ts - b.ts);
+
+			const clusters: Array<{ ts: number; iso: string; ids: string[] }> = [];
+			const CLUSTER_WINDOW_MS = 3 * 60 * 1000;
+			for (const item of sorted) {
+				const last = clusters[clusters.length - 1];
+				if (!last || item.ts - last.ts > CLUSTER_WINDOW_MS) {
+					clusters.push({ ts: item.ts, iso: item.iso, ids: [item.id] });
+				} else {
+					last.ids.push(item.id);
+					last.ts = item.ts;
+					last.iso = item.iso;
+				}
+			}
+
+			const reconstructed: SyncHistoryEntry[] = [];
+			for (const cluster of clusters.reverse()) {
+				const historyItems: SyncHistoryItem[] = [];
+				let createdCount = 0;
+
+				for (const id of cluster.ids) {
+					const match = fileById.get(id);
+					if (!match) continue;
+					const { file, fm } = match;
+					const isSection = id.startsWith('section:');
+					const courseIdPart = id.split(':')[1] || String(fm['odtuclass-course-id'] || '');
+					const courseCode =
+						courseTitleByCourseId.get(courseIdPart) ||
+						this.extractCanonicalCourseCode(String(fm.course || fm.parentId || '')) ||
+						'ODTUClass';
+					const parentRaw = String(fm.parentId || '');
+					const parentPipe = parentRaw.match(/\[\[.*?\|(.*?)\]\]/) || parentRaw.match(/\[\[(.*?)\]\]/);
+					const parentTitle = parentPipe ? parentPipe[1] : '';
+
+					createdCount++;
+					historyItems.push({
+						action: 'created',
+						title: String(fm.title || file.basename),
+						courseCode,
+						parentTitle,
+						filePath: file.path,
+						detail: isSection ? 'Haftalık bölüm eklendi' : 'Ödev/görev eklendi'
+					});
+
+					if (isSection && subtasksByParentPrefix.has(id)) {
+						for (const sub of subtasksByParentPrefix.get(id)!) {
+							createdCount++;
+							historyItems.push({
+								action: 'created',
+								title: String(sub.fm.title || sub.file.basename),
+								courseCode,
+								parentTitle: String(fm.title || file.basename),
+								filePath: sub.file.path,
+								detail: 'Suggested Problems alt görevi eklendi'
+							});
+						}
+					}
+				}
+
+				if (historyItems.length > 0) {
+					reconstructed.push({
+						id: `snapshot-${cluster.ts}`,
+						timestamp: cluster.iso,
+						source: 'snapshot',
+						stats: {
+							created: createdCount,
+							updated: 0,
+							moved: 0,
+							slidesDownloaded: 0,
+							slidesReplaced: 0,
+							filtered: 0,
+							skipped: 0,
+							failed: 0
+						},
+						items: historyItems
+					});
+				}
+			}
+
+			if (forceRebuild) {
+				const nonSnapshots = (this.settings.syncHistory || []).filter((h) => h.source !== 'snapshot');
+				this.settings.syncHistory = [...nonSnapshots, ...reconstructed].slice(0, 40);
+			} else {
+				this.settings.syncHistory = reconstructed.slice(0, 40);
+			}
+			await this.saveSettings();
+			return reconstructed.length;
+		} catch (e) {
+			console.warn('[ODTUClass] Could not seed sync history from vault:', e);
+			return 0;
+		}
 	}
 
 	async processPendingAssignments() {
@@ -123,6 +287,12 @@ export default class ODTUClassPlugin extends Plugin {
 		}
 
 		let processedCount = 0;
+		let createdCount = 0;
+		let updatedCount = 0;
+		let movedCount = 0;
+		let filteredCount = 0;
+		let failCount = 0;
+		const historyItems: SyncHistoryItem[] = [];
 
 		if (!this.app.vault.getAbstractFileByPath(this.settings.outputFolder)) {
 			try {
@@ -139,14 +309,93 @@ export default class ODTUClassPlugin extends Plugin {
 				const content = await this.app.vault.adapter.read(filePath);
 				const assignment = JSON.parse(content);
 				
-				await this.processAssignment(assignment);
+				const res = await this.processAssignment(assignment);
+				if (res) {
+					if (res.action === 'filtered') {
+						filteredCount++;
+						historyItems.push({
+							action: 'filtered',
+							title: res.title,
+							courseCode: res.courseCode,
+							detail: res.detail
+						});
+					} else {
+						if (res.action === 'created') {
+							createdCount++;
+							historyItems.push({
+								action: 'created',
+								title: res.title,
+								courseCode: res.courseCode,
+								parentTitle: res.parentTitle,
+								filePath: res.filePath,
+								detail: res.isSection ? 'Haftalık bölüm eklendi' : 'Yeni ödev/görev eklendi'
+							});
+						} else if (res.action === 'updated') {
+							updatedCount++;
+							historyItems.push({
+								action: 'updated',
+								title: res.title,
+								courseCode: res.courseCode,
+								parentTitle: res.parentTitle,
+								filePath: res.filePath,
+								detail: res.isSection ? 'Haftalık bölüm güncellendi' : 'Ödev/görev güncellendi'
+							});
+						}
+						if (Array.isArray(res.subtasksAdded)) {
+							for (const st of res.subtasksAdded) {
+								createdCount++;
+								historyItems.push({
+									action: 'created',
+									title: st.title,
+									courseCode: res.courseCode,
+									parentTitle: res.title,
+									filePath: st.filePath,
+									detail: 'Suggested Problems alt görevi eklendi'
+								});
+							}
+						}
+						if (Array.isArray(res.subtasksMoved)) {
+							for (const mv of res.subtasksMoved) {
+								movedCount++;
+								historyItems.push({
+									action: 'moved',
+									title: mv.title,
+									courseCode: res.courseCode,
+									parentTitle: res.title,
+									filePath: mv.filePath,
+									detail: mv.detail
+								});
+							}
+						}
+					}
+				}
 				
 				await this.app.vault.adapter.remove(filePath);
 				processedCount++;
 			} catch (error) {
+				failCount++;
 				console.error(`Failed to process assignment file ${filePath}:`, error);
 				new Notice(`Failed to process assignment: ${filePath}. Check console for details.`);
 			}
+		}
+
+		if (processedCount > 0 || failCount > 0) {
+			await this.recordSyncHistory({
+				id: `local-${Date.now()}`,
+				timestamp: new Date().toISOString(),
+				source: 'local',
+				stats: {
+					created: createdCount,
+					updated: updatedCount,
+					moved: movedCount,
+					slidesDownloaded: 0,
+					slidesReplaced: 0,
+					filtered: filteredCount,
+					skipped: 0,
+					failed: failCount
+				},
+				items: historyItems
+			});
 		}
 
 		if (processedCount > 0) {
@@ -756,9 +1005,27 @@ odtuclass-course: "${courseName}"
 		return false;
 	}
 
-	async processAssignment(assignment: any, skipIfExists: boolean = false) {
+	async processAssignment(
+		assignment: any,
+		skipIfExists: boolean = false
+	): Promise<{
+		action: 'created' | 'updated' | 'unchanged' | 'filtered';
+		title: string;
+		courseCode: string;
+		parentTitle?: string;
+		filePath?: string;
+		isSection?: boolean;
+		detail?: string;
+		subtasksAdded?: Array<{ title: string; filePath: string }>;
+		subtasksMoved?: Array<{ title: string; filePath: string; detail: string }>;
+	} | null> {
 		if (this.isNonTaskPayload(assignment)) {
-			return;
+			return {
+				action: 'filtered',
+				title: String(assignment?.title || 'Untitled'),
+				courseCode: this.extractCanonicalCourseCode(assignment?.courseName) || 'ODTUClass',
+				detail: 'Görev dışı içerik filtrelendi (duyuru / yoklama / çözümlü sorular)'
+			};
 		}
 		const courseTask = await this.getOrCreateCourseTask(assignment.courseId, assignment.courseName);
 
@@ -835,6 +1102,11 @@ odtuclass-course: "${courseName}"
 		}
 
 		let targetFile: TFile;
+		let action: 'created' | 'updated' | 'unchanged' = existingFile ? 'unchanged' : 'created';
+		let subtaskResult: {
+			added: Array<{ title: string; filePath: string }>;
+			moved: Array<{ title: string; filePath: string; detail: string }>;
+		} = { added: [], moved: [] };
 
 		if (existingFile) {
 			targetFile = existingFile;
@@ -851,7 +1123,7 @@ odtuclass-course: "${courseName}"
 					console.warn(
 						`Section file ${existingFile.path} is missing valid ODTUCLASS markers. Skipping update.`
 					);
-					return;
+					return null;
 				}
 
 				const renderedBeginIndex = renderedContent.indexOf(beginMarker);
@@ -893,10 +1165,13 @@ odtuclass-course: "${courseName}"
 					updatedContent = updatedContent.replace(/^type:\s*.*$/m, `type: "subtask"\nparentId: "${parentLink}"`);
 				}
 
-				await this.app.vault.modify(existingFile, updatedContent);
+				if (updatedContent !== existingContent) {
+					await this.app.vault.modify(existingFile, updatedContent);
+					action = 'updated';
+				}
 
 				if (assignment.suggestedProblems && Array.isArray(assignment.suggestedProblems) && assignment.suggestedProblems.length > 0) {
-					await this.processSubtasks(assignment, existingFile, cleanTitle);
+					subtaskResult = await this.processSubtasks(assignment, existingFile, cleanTitle);
 				}
 			} else {
 				if (!skipIfExists) {
@@ -974,6 +1249,7 @@ odtuclass-course: "${courseName}"
 
 					if (updatedContent !== existingContent) {
 						await this.app.vault.modify(existingFile, updatedContent);
+						action = 'updated';
 					}
 				}
 			}
@@ -991,8 +1267,9 @@ odtuclass-course: "${courseName}"
 				initialContent = initialContent.replace(/^(-\s*\*\*Durum:\*\*\s*).*$/m, `$1Devam Ediyor`);
 			}
 			targetFile = (await this.app.vault.create(outputPath, initialContent)) as TFile;
+			action = 'created';
 			if (isSection && assignment.suggestedProblems && Array.isArray(assignment.suggestedProblems) && assignment.suggestedProblems.length > 0) {
-				await this.processSubtasks(assignment, targetFile, cleanTitle);
+				subtaskResult = await this.processSubtasks(assignment, targetFile, cleanTitle);
 			}
 		}
 
@@ -1001,9 +1278,29 @@ odtuclass-course: "${courseName}"
 			basename: targetFile.basename,
 			title: cleanTitle
 		});
+
+		return {
+			action,
+			title: cleanTitle,
+			courseCode: courseTask.title,
+			parentTitle: parentTask.title,
+			filePath: targetFile.path,
+			isSection,
+			subtasksAdded: subtaskResult.added,
+			subtasksMoved: subtaskResult.moved
+		};
 	}
 
-	async processSubtasks(assignment: any, parentFile: TFile, parentCleanTitle: string) {
+	async processSubtasks(
+		assignment: any,
+		parentFile: TFile,
+		parentCleanTitle: string
+	): Promise<{
+		added: Array<{ title: string; filePath: string }>;
+		moved: Array<{ title: string; filePath: string; detail: string }>;
+	}> {
+		const added: Array<{ title: string; filePath: string }> = [];
+		const moved: Array<{ title: string; filePath: string; detail: string }> = [];
 		const subtaskTemplatePath = `${this.settings.templateFolder}/Subtask.md`;
 		const subtaskTemplateFile = this.app.vault.getAbstractFileByPath(subtaskTemplatePath);
 		
@@ -1079,6 +1376,7 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
 
 			const earlierProblems = new Set<string>();
 			const carriedOverChecked = new Set<string>();
+			let carriedFromEarlierWeek: string | null = null;
 			let skipBecauseCarriedToLaterWeek = false;
 			let hasTitleCollision = false;
 
@@ -1126,6 +1424,7 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
 						if (!otherIsDone && isCarriedOverSubset) {
 							// Carry over ("Sarkan Konu"): remove unfinished subtask from the earlier week and move to current week!
 							for (const cp of otherChecked) carriedOverChecked.add(cp);
+							carriedFromEarlierWeek = otherWeekNum !== null ? `Week ${otherWeekNum}` : 'önceki hafta';
 							const otherSectionId = fmId.split(':')[2];
 							const otherParentId = `section:${assignment.courseId}:${otherSectionId}`;
 							for (const pf of this.app.vault.getMarkdownFiles()) {
@@ -1193,8 +1492,21 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
 				renderedSubtask = renderedSubtask.replace(regex, String(subtaskData[key] ?? ''));
 			}
 
+			const finalSubtaskPath = existingSubtask ? existingSubtask.path : subtaskPath;
 			if (!existingSubtask) {
 				await this.app.vault.create(subtaskPath, renderedSubtask);
+				if (carriedFromEarlierWeek) {
+					moved.push({
+						title: subtaskTitle,
+						filePath: subtaskPath,
+						detail: `${carriedFromEarlierWeek} → ${weekPrefixMatch ? weekPrefixMatch[1] : parentTitle} (Sarkan Konu taşındı)`
+					});
+				} else {
+					added.push({
+						title: subtaskTitle,
+						filePath: subtaskPath
+					});
+				}
 			} else {
 				const subContent = await this.app.vault.read(existingSubtask);
 				const expectedParentLink = `[[${parentBaseName}|${parentTitle}]]`;
@@ -1208,6 +1520,13 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
 				if (mergedContent !== subContent) {
 					await this.app.vault.modify(existingSubtask, mergedContent);
 				}
+				if (carriedFromEarlierWeek) {
+					moved.push({
+						title: subtaskTitle,
+						filePath: finalSubtaskPath,
+						detail: `${carriedFromEarlierWeek} → ${weekPrefixMatch ? weekPrefixMatch[1] : parentTitle} (Sarkan Konu taşındı)`
+					});
+				}
 			}
 
 			subtaskRefs.push({
@@ -1219,6 +1538,8 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
 		if (subtaskRefs.length > 0) {
 			await this.linkSubtasksInParent(parentFile, subtaskRefs);
 		}
+
+		return { added, moved };
 	}
 
 	async linkSubtasksInParent(parentFile: TFile, subtaskRefs: Array<{ basename: string; title: string }>) {
@@ -1639,6 +1960,241 @@ class ODTUClassSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 					this.display();
 				}));
+
+		// =========================================================================
+		// Senkronizasyon Geçmişi (Sync History)
+		// =========================================================================
+		containerEl.createEl('h3', { text: '🕒 Senkronizasyon Geçmişi (Sync History)' });
+
+		new Setting(containerEl)
+			.setName('Çekme ve Görev Geçmişi')
+			.setDesc('Her senkronizasyonda hangi ders/hafta altına hangi ödevlerin, alt görevlerin veya slaytların eklendiğini gösterir.')
+			.addButton(btn => btn
+				.setButtonText('Vault\'tan Geçmişi Yenile')
+				.setTooltip('processed.json ve mevcut görev dosyalarından geçmiş kayıtları yeniden oluşturur')
+				.onClick(async () => {
+					const count = await this.plugin.seedSyncHistoryFromVault(true);
+					this.display();
+					new Notice(`Senkronizasyon geçmişi yenilendi (${count} geçmiş oturum bulundu).`);
+				}))
+			.addButton(btn => btn
+				.setButtonText('Geçmişi Temizle')
+				.setWarning()
+				.onClick(async () => {
+					this.plugin.settings.syncHistory = [];
+					await this.plugin.saveSettings();
+					this.display();
+					new Notice('Senkronizasyon geçmişi temizlendi.');
+				}));
+
+		const historyContainer = containerEl.createDiv({ cls: 'odtuclass-sync-history-container' });
+		historyContainer.style.display = 'flex';
+		historyContainer.style.flexDirection = 'column';
+		historyContainer.style.gap = '10px';
+		historyContainer.style.marginTop = '8px';
+
+		const renderHistoryList = () => {
+			historyContainer.empty();
+			const history = this.plugin.settings.syncHistory || [];
+
+			if (history.length === 0) {
+				const emptyEl = historyContainer.createDiv();
+				emptyEl.style.padding = '12px 14px';
+				emptyEl.style.borderRadius = '8px';
+				emptyEl.style.background = 'var(--background-secondary)';
+				emptyEl.style.color = 'var(--text-muted)';
+				emptyEl.style.fontSize = '0.9em';
+				emptyEl.setText('Henüz kaydedilmiş bir senkronizasyon geçmişi yok. "Sync ODTUClass" veya "Vault\'tan Geçmişi Yenile" butonuna tıklayabilirsiniz.');
+				return;
+			}
+
+			history.forEach((entry, idx) => {
+				const detailsEl = historyContainer.createEl('details');
+				if (idx === 0) {
+					detailsEl.open = true;
+				}
+				detailsEl.style.border = '1px solid var(--background-modifier-border)';
+				detailsEl.style.borderRadius = '8px';
+				detailsEl.style.background = 'var(--background-secondary)';
+				detailsEl.style.padding = '8px 12px';
+
+				const summaryEl = detailsEl.createEl('summary');
+				summaryEl.style.cursor = 'pointer';
+				summaryEl.style.display = 'flex';
+				summaryEl.style.flexWrap = 'wrap';
+				summaryEl.style.alignItems = 'center';
+				summaryEl.style.justifyContent = 'space-between';
+				summaryEl.style.gap = '8px';
+				summaryEl.style.fontWeight = '600';
+
+				const leftTitle = summaryEl.createSpan();
+				let formattedDate = entry.timestamp;
+				try {
+					const d = new Date(entry.timestamp);
+					if (!Number.isNaN(d.getTime())) {
+						formattedDate = new Intl.DateTimeFormat('tr-TR', {
+							timeZone: 'Europe/Istanbul',
+							day: '2-digit',
+							month: 'short',
+							year: 'numeric',
+							hour: '2-digit',
+							minute: '2-digit'
+						}).format(d);
+					}
+				} catch {}
+
+				const sourceLabel =
+					entry.source === 'github'
+						? 'GitHub Sync'
+						: entry.source === 'local'
+							? 'Yerel Sync'
+							: 'Önceki Sync Kaydı';
+				leftTitle.setText(`📅 ${formattedDate} — ${sourceLabel}`);
+
+				const badgesWrap = summaryEl.createSpan();
+				badgesWrap.style.display = 'inline-flex';
+				badgesWrap.style.flexWrap = 'wrap';
+				badgesWrap.style.gap = '6px';
+				badgesWrap.style.fontSize = '0.8em';
+				badgesWrap.style.fontWeight = '500';
+
+				const makeBadge = (text: string, bg: string, color: string) => {
+					const b = badgesWrap.createSpan({ text });
+					b.style.padding = '2px 8px';
+					b.style.borderRadius = '999px';
+					b.style.background = bg;
+					b.style.color = color;
+				};
+
+				const st = entry.stats || {
+					created: 0,
+					updated: 0,
+					moved: 0,
+					slidesDownloaded: 0,
+					slidesReplaced: 0,
+					filtered: 0,
+					skipped: 0,
+					failed: 0
+				};
+
+				if (st.created > 0) {
+					makeBadge(`+${st.created} eklendi`, 'rgba(46, 160, 67, 0.2)', 'var(--text-success, #3fb950)');
+				}
+				if (st.updated > 0) {
+					makeBadge(`↻ ${st.updated} güncellendi`, 'rgba(56, 139, 253, 0.2)', 'var(--text-accent)');
+				}
+				if (st.moved > 0) {
+					makeBadge(`↪ ${st.moved} taşındı`, 'rgba(210, 153, 34, 0.2)', 'var(--text-warning, #d29922)');
+				}
+				if ((st.slidesDownloaded || 0) + (st.slidesReplaced || 0) > 0) {
+					makeBadge(
+						`📊 ${(st.slidesDownloaded || 0) + (st.slidesReplaced || 0)} slayt`,
+						'rgba(163, 113, 247, 0.2)',
+						'var(--text-accent)'
+					);
+				}
+				if (st.filtered > 0) {
+					makeBadge(`🛡️ ${st.filtered} filtrelendi`, 'var(--background-modifier-hover)', 'var(--text-muted)');
+				}
+				if (st.skipped > 0 && entry.items.length === 0) {
+					makeBadge(`⏭️ ${st.skipped} değişiklik yok`, 'var(--background-modifier-hover)', 'var(--text-muted)');
+				}
+				if (st.failed > 0) {
+					makeBadge(`⚠️ ${st.failed} hata`, 'rgba(248, 81, 73, 0.2)', 'var(--text-error)');
+				}
+
+				const bodyEl = detailsEl.createDiv();
+				bodyEl.style.marginTop = '10px';
+				bodyEl.style.paddingTop = '8px';
+				bodyEl.style.borderTop = '1px solid var(--background-modifier-border)';
+				bodyEl.style.display = 'flex';
+				bodyEl.style.flexDirection = 'column';
+				bodyEl.style.gap = '6px';
+
+				if (!entry.items || entry.items.length === 0) {
+					const noChangeEl = bodyEl.createDiv();
+					noChangeEl.style.color = 'var(--text-muted)';
+					noChangeEl.style.fontSize = '0.88em';
+					noChangeEl.setText(
+						`Bu çekmede yeni veya güncellenen bir ödev/slayt bulunmadı (${st.skipped || 0} mevcut öğe kontrol edildi).`
+					);
+				} else {
+					for (const item of entry.items) {
+						const row = bodyEl.createDiv();
+						row.style.display = 'flex';
+						row.style.flexWrap = 'wrap';
+						row.style.alignItems = 'baseline';
+						row.style.gap = '6px';
+						row.style.fontSize = '0.88em';
+						row.style.padding = '3px 4px';
+						row.style.borderRadius = '4px';
+
+						const iconMap: Record<string, string> = {
+							created: '✅',
+							updated: '🔄',
+							moved: '↪',
+							slide: '📊',
+							filtered: '🛡️'
+						};
+						row.createSpan({ text: iconMap[item.action] || '•' });
+
+						if (item.courseCode) {
+							const courseBadge = row.createSpan({ text: item.courseCode });
+							courseBadge.style.fontSize = '0.82em';
+							courseBadge.style.fontWeight = '600';
+							courseBadge.style.padding = '1px 6px';
+							courseBadge.style.borderRadius = '4px';
+							courseBadge.style.background = 'var(--background-primary)';
+							courseBadge.style.border = '1px solid var(--background-modifier-border)';
+						}
+
+						if (item.filePath) {
+							const linkEl = row.createEl('a', {
+								text: item.title,
+								href: '#'
+							});
+							linkEl.style.fontWeight = '500';
+							linkEl.style.cursor = 'pointer';
+							linkEl.addEventListener('click', async (ev) => {
+								ev.preventDefault();
+								const target = this.app.vault.getAbstractFileByPath(item.filePath!);
+								if (target && target instanceof TFile) {
+									// Close settings modal and open the file
+									(this.app as any).setting?.close?.();
+									await this.app.workspace.getLeaf(false).openFile(target);
+								} else {
+									new Notice(`Dosya bulunamadı (taşınmış veya silinmiş olabilir): ${item.filePath}`);
+								}
+							});
+						} else {
+							const titleSpan = row.createSpan({ text: item.title });
+							titleSpan.style.fontWeight = '500';
+						}
+
+						const metaParts: string[] = [];
+						if (item.parentTitle && item.parentTitle !== item.courseCode) {
+							metaParts.push(`→ ${item.parentTitle}`);
+						}
+						if (item.detail) {
+							metaParts.push(item.detail);
+						}
+						if (metaParts.length > 0) {
+							const metaSpan = row.createSpan({ text: `(${metaParts.join(' • ')})` });
+							metaSpan.style.color = 'var(--text-muted)';
+							metaSpan.style.fontSize = '0.85em';
+						}
+					}
+				}
+			});
+		};
+
+		if (!this.plugin.settings.syncHistory || this.plugin.settings.syncHistory.length === 0) {
+			this.plugin.seedSyncHistoryFromVault(false).then((seeded) => {
+				renderHistoryList();
+			});
+		} else {
+			renderHistoryList();
+		}
 	}
 }
 
