@@ -1212,6 +1212,8 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
     const weekPrefixMatch = parentTitle.match(/^(Week\s+\d+)/i) || parentBaseName.match(/^(Week\s+\d+)/i);
     const weekPrefix = weekPrefixMatch ? `${weekPrefixMatch[1]} - ` : "";
     const subtaskRefs = [];
+    const currentWeekMatch = weekPrefixMatch ? parseInt(weekPrefixMatch[1].replace(/\D+/g, ""), 10) : null;
+    const coursePrefix = `section:${assignment.courseId}:`;
     for (const item of assignment.suggestedProblems) {
       const sectionNum = item.section;
       const topicTitle = item.title ? ` ${item.title}` : "";
@@ -1221,16 +1223,41 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
       const fullSubtaskBasename = `${weekPrefix}${safeSubtaskTitle}`;
       const subtaskFileName = `${fullSubtaskBasename}.md`;
       const subtaskPath = `${this.settings.outputFolder}/${subtaskFileName}`;
+      const earlierProblems = /* @__PURE__ */ new Set();
       let hasTitleCollision = false;
       for (const f of this.app.vault.getMarkdownFiles()) {
         const fm = (_a = this.app.metadataCache.getFileCache(f)) == null ? void 0 : _a.frontmatter;
-        if (fm && fm.id && fm.id !== subtaskId && fm.title === baseSubtaskTitle) {
+        if (!fm || !fm.id || fm.id === subtaskId)
+          continue;
+        const fmId = String(fm.id);
+        if (fm.title === baseSubtaskTitle) {
           hasTitleCollision = true;
-          break;
+        }
+        if (fmId.startsWith(coursePrefix) && fmId.endsWith(`:subtask:${sectionNum}`)) {
+          const otherParent = String(fm.parentId || f.basename);
+          const otherWeekMatch = otherParent.match(/\bweek[\s-]*0?(\d+)\b/i) || String(fm.title || "").match(/\bweek[\s-]*0?(\d+)\b/i);
+          const otherWeekNum = otherWeekMatch ? parseInt(otherWeekMatch[1], 10) : null;
+          const otherDue = fm.due ? String(fm.due).slice(0, 10) : "";
+          const curDue = assignment.weekEnd ? String(assignment.weekEnd).slice(0, 10) : "";
+          const isEarlier = currentWeekMatch !== null && otherWeekNum !== null && otherWeekNum < currentWeekMatch || otherWeekNum === null && otherDue && curDue && otherDue < curDue;
+          if (isEarlier) {
+            hasTitleCollision = true;
+            const otherContent = await this.app.vault.read(f);
+            const probRegex = /^-\s*\[[xX ]\]\s*Problem\s+(.+)$/gm;
+            let m;
+            while ((m = probRegex.exec(otherContent)) !== null) {
+              earlierProblems.add(m[1].trim());
+            }
+          }
         }
       }
+      const rawProblems = item.problems || [];
+      const effectiveProblems = earlierProblems.size > 0 ? rawProblems.filter((p) => !earlierProblems.has(String(p).trim())) : rawProblems;
+      if (earlierProblems.size > 0 && effectiveProblems.length === 0) {
+        continue;
+      }
       const subtaskTitle = hasTitleCollision && weekPrefix ? `${weekPrefix}${baseSubtaskTitle}` : baseSubtaskTitle;
-      const problemsList = (item.problems || []).map((p) => `- [ ] Problem ${p}`).join("\n");
+      const problemsList = effectiveProblems.map((p) => `- [ ] Problem ${p}`).join("\n");
       const subtaskData = {
         id: subtaskId,
         title: subtaskTitle,
@@ -1266,7 +1293,7 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
         const expectedParentLink = `[[${parentBaseName}|${parentTitle}]]`;
         const mergedContent = this.mergeSuggestedProblemsContent(
           subContent,
-          item.problems || [],
+          effectiveProblems,
           sectionNum,
           expectedParentLink,
           assignment.weekEnd || ""
