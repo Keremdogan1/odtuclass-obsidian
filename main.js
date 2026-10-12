@@ -832,6 +832,68 @@ ${subtasksEndMarker}
       await this.app.vault.modify(parentFile, content);
     }
   }
+  async unlinkChildFromParent(parentFile, childBasename) {
+    let content = await this.app.vault.read(parentFile);
+    let changed = false;
+    const fmRegex = /^---\r?\n([\s\S]*?)\r?\n---/;
+    const fmMatch = content.match(fmRegex);
+    if (fmMatch) {
+      let fmText = fmMatch[1];
+      const subtaskBlockRegex = /^subtaskIds:[ \t]*(?:(\[[^\r\n]*\])|[ \t]*\r?\n((?:[ \t]*-[ \t]+[^\r\n]+\r?\n?)*))?/m;
+      const blockMatch = fmText.match(subtaskBlockRegex);
+      if (blockMatch) {
+        const existingItems = [];
+        if (blockMatch[1]) {
+          const inlineVal = blockMatch[1].trim();
+          if (inlineVal !== "[]") {
+            try {
+              const parsed = JSON.parse(inlineVal);
+              if (Array.isArray(parsed)) {
+                for (const item of parsed) {
+                  if (typeof item === "string" && item.trim()) {
+                    existingItems.push(item.trim());
+                  }
+                }
+              }
+            } catch (e) {
+              const linkMatches = inlineVal.match(/\[\[.*?\]\]/g) || [];
+              existingItems.push(...linkMatches);
+            }
+          }
+        } else if (blockMatch[2]) {
+          const lines = blockMatch[2].split(/\r?\n/);
+          for (const line of lines) {
+            const m = line.match(/^[ \t]*-[ \t]+(.*?)\s*$/);
+            if (m && m[1]) {
+              existingItems.push(m[1].replace(/^["']|["']$/g, "").trim());
+            }
+          }
+        }
+        const filteredItems = existingItems.filter(
+          (item) => !item.includes(`[[${childBasename}|`) && !item.includes(`[[${childBasename}]]`)
+        );
+        if (filteredItems.length !== existingItems.length) {
+          const yamlList = filteredItems.length > 0 ? `subtaskIds:
+${filteredItems.map((it) => `  - "${it}"`).join("\n")}` : `subtaskIds: []`;
+          fmText = fmText.replace(subtaskBlockRegex, yamlList);
+          content = content.replace(fmRegex, `---
+${fmText}
+---`);
+          changed = true;
+        }
+      }
+    }
+    const escapedBase = childBasename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const lineRegex = new RegExp(`^[ \\t]*-[ \\t]*\\[[xX ]\\][ \\t]*\\[\\[${escapedBase}(?:\\|[^\\]]*)?\\]\\][^\\r\\n]*\\r?\\n?`, "gm");
+    const newContent = content.replace(lineRegex, "");
+    if (newContent !== content) {
+      content = newContent;
+      changed = true;
+    }
+    if (changed) {
+      await this.app.vault.modify(parentFile, content);
+    }
+  }
   async findParentSectionTask(courseId, cleanTitle, assignment) {
     const courseIdStr = String(courseId);
     const folder = this.app.vault.getAbstractFileByPath(this.settings.outputFolder);
@@ -1172,7 +1234,7 @@ $&`);
     });
   }
   async processSubtasks(assignment, parentFile, parentCleanTitle) {
-    var _a, _b, _c;
+    var _a, _b, _c, _d, _e, _f;
     const subtaskTemplatePath = `${this.settings.templateFolder}/Subtask.md`;
     const subtaskTemplateFile = this.app.vault.getAbstractFileByPath(subtaskTemplatePath);
     let subtaskTemplateContent = "";
@@ -1223,16 +1285,30 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
       const fullSubtaskBasename = `${weekPrefix}${safeSubtaskTitle}`;
       const subtaskFileName = `${fullSubtaskBasename}.md`;
       const subtaskPath = `${this.settings.outputFolder}/${subtaskFileName}`;
+      let existingSubtask = null;
+      const directSubtask = this.app.vault.getAbstractFileByPath(subtaskPath);
+      if (directSubtask && directSubtask instanceof import_obsidian2.TFile) {
+        existingSubtask = directSubtask;
+      } else {
+        for (const f of this.app.vault.getMarkdownFiles()) {
+          const cache = this.app.metadataCache.getFileCache(f);
+          if (((_a = cache == null ? void 0 : cache.frontmatter) == null ? void 0 : _a.id) === subtaskId) {
+            existingSubtask = f;
+            break;
+          }
+        }
+      }
+      const rawProblems = (item.problems || []).map((p) => String(p).trim());
+      const rawProblemSet = new Set(rawProblems);
       const earlierProblems = /* @__PURE__ */ new Set();
+      const carriedOverChecked = /* @__PURE__ */ new Set();
+      let skipBecauseCarriedToLaterWeek = false;
       let hasTitleCollision = false;
       for (const f of this.app.vault.getMarkdownFiles()) {
-        const fm = (_a = this.app.metadataCache.getFileCache(f)) == null ? void 0 : _a.frontmatter;
+        const fm = (_b = this.app.metadataCache.getFileCache(f)) == null ? void 0 : _b.frontmatter;
         if (!fm || !fm.id || fm.id === subtaskId)
           continue;
         const fmId = String(fm.id);
-        if (fm.title === baseSubtaskTitle) {
-          hasTitleCollision = true;
-        }
         if (fmId.startsWith(coursePrefix) && fmId.endsWith(`:subtask:${sectionNum}`)) {
           const otherParent = String(fm.parentId || f.basename);
           const otherWeekMatch = otherParent.match(/\bweek[\s-]*0?(\d+)\b/i) || String(fm.title || "").match(/\bweek[\s-]*0?(\d+)\b/i);
@@ -1240,24 +1316,62 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
           const otherDue = fm.due ? String(fm.due).slice(0, 10) : "";
           const curDue = assignment.weekEnd ? String(assignment.weekEnd).slice(0, 10) : "";
           const isEarlier = currentWeekMatch !== null && otherWeekNum !== null && otherWeekNum < currentWeekMatch || otherWeekNum === null && otherDue && curDue && otherDue < curDue;
-          if (isEarlier) {
-            hasTitleCollision = true;
-            const otherContent = await this.app.vault.read(f);
-            const probRegex = /^-\s*\[[xX ]\]\s*Problem\s+(.+)$/gm;
-            let m;
-            while ((m = probRegex.exec(otherContent)) !== null) {
-              earlierProblems.add(m[1].trim());
+          const isLater = currentWeekMatch !== null && otherWeekNum !== null && otherWeekNum > currentWeekMatch || otherWeekNum === null && otherDue && curDue && otherDue > curDue;
+          const otherContent = await this.app.vault.read(f);
+          const otherProbs = [];
+          const otherChecked = /* @__PURE__ */ new Set();
+          const probRegex = /^-\s*\[([xX ])\]\s*Problem\s+(.+?)(?:\s*✅.*)?$/gm;
+          let m;
+          while ((m = probRegex.exec(otherContent)) !== null) {
+            const pNum = m[2].trim();
+            otherProbs.push(pNum);
+            if (m[1].toLowerCase() === "x") {
+              otherChecked.add(pNum);
             }
           }
+          const otherIsDone = String(fm.status || "").toLowerCase() === "done" || otherProbs.length > 0 && otherChecked.size === otherProbs.length;
+          if (isEarlier) {
+            const isCarriedOverSubset = otherProbs.length > 0 && otherProbs.every((p) => rawProblemSet.has(p));
+            if (!otherIsDone && isCarriedOverSubset) {
+              for (const cp of otherChecked)
+                carriedOverChecked.add(cp);
+              const otherSectionId = fmId.split(":")[2];
+              const otherParentId = `section:${assignment.courseId}:${otherSectionId}`;
+              for (const pf of this.app.vault.getMarkdownFiles()) {
+                const pfm = (_c = this.app.metadataCache.getFileCache(pf)) == null ? void 0 : _c.frontmatter;
+                if (pfm && String(pfm.id) === otherParentId) {
+                  await this.unlinkChildFromParent(pf, f.basename);
+                  break;
+                }
+              }
+              await this.app.vault.delete(f);
+            } else {
+              for (const p of otherProbs)
+                earlierProblems.add(p);
+              hasTitleCollision = true;
+            }
+          } else if (isLater) {
+            const otherProbSet = new Set(otherProbs);
+            const allInLater = rawProblems.length > 0 && rawProblems.every((p) => otherProbSet.has(p));
+            const currentIsDone = existingSubtask && String(((_e = (_d = this.app.metadataCache.getFileCache(existingSubtask)) == null ? void 0 : _d.frontmatter) == null ? void 0 : _e.status) || "").toLowerCase() === "done";
+            if (allInLater && !currentIsDone) {
+              skipBecauseCarriedToLaterWeek = true;
+            }
+          }
+        } else if (fm.title === baseSubtaskTitle) {
+          hasTitleCollision = true;
         }
       }
-      const rawProblems = item.problems || [];
-      const effectiveProblems = earlierProblems.size > 0 ? rawProblems.filter((p) => !earlierProblems.has(String(p).trim())) : rawProblems;
-      if (earlierProblems.size > 0 && effectiveProblems.length === 0) {
+      const effectiveProblems = earlierProblems.size > 0 ? rawProblems.filter((p) => !earlierProblems.has(p)) : rawProblems;
+      if (skipBecauseCarriedToLaterWeek || earlierProblems.size > 0 && effectiveProblems.length === 0) {
+        if (existingSubtask) {
+          await this.unlinkChildFromParent(parentFile, existingSubtask.basename);
+          await this.app.vault.delete(existingSubtask);
+        }
         continue;
       }
       const subtaskTitle = hasTitleCollision && weekPrefix ? `${weekPrefix}${baseSubtaskTitle}` : baseSubtaskTitle;
-      const problemsList = effectiveProblems.map((p) => `- [ ] Problem ${p}`).join("\n");
+      const problemsList = effectiveProblems.map((p) => `- [${carriedOverChecked.has(p) ? "x" : " "}] Problem ${p}`).join("\n");
       const subtaskData = {
         id: subtaskId,
         title: subtaskTitle,
@@ -1270,21 +1384,7 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
       let renderedSubtask = subtaskTemplateContent;
       for (const key of Object.keys(subtaskData)) {
         const regex = new RegExp(`\\{\\{${key}\\}\\}`, "g");
-        renderedSubtask = renderedSubtask.replace(regex, String((_b = subtaskData[key]) != null ? _b : ""));
-      }
-      let existingSubtask = null;
-      const directSubtask = this.app.vault.getAbstractFileByPath(subtaskPath);
-      if (directSubtask && directSubtask instanceof import_obsidian2.TFile) {
-        existingSubtask = directSubtask;
-      } else {
-        const mdFiles = this.app.vault.getMarkdownFiles();
-        for (const f of mdFiles) {
-          const cache = this.app.metadataCache.getFileCache(f);
-          if (((_c = cache == null ? void 0 : cache.frontmatter) == null ? void 0 : _c.id) === subtaskId) {
-            existingSubtask = f;
-            break;
-          }
-        }
+        renderedSubtask = renderedSubtask.replace(regex, String((_f = subtaskData[key]) != null ? _f : ""));
       }
       if (!existingSubtask) {
         await this.app.vault.create(subtaskPath, renderedSubtask);

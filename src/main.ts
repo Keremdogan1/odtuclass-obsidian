@@ -493,6 +493,77 @@ odtuclass-course: "${courseName}"
 		}
 	}
 
+	async unlinkChildFromParent(parentFile: TFile, childBasename: string) {
+		let content = await this.app.vault.read(parentFile);
+		let changed = false;
+
+		const fmRegex = /^---\r?\n([\s\S]*?)\r?\n---/;
+		const fmMatch = content.match(fmRegex);
+		if (fmMatch) {
+			let fmText = fmMatch[1];
+			const subtaskBlockRegex = /^subtaskIds:[ \t]*(?:(\[[^\r\n]*\])|[ \t]*\r?\n((?:[ \t]*-[ \t]+[^\r\n]+\r?\n?)*))?/m;
+			const blockMatch = fmText.match(subtaskBlockRegex);
+			if (blockMatch) {
+				const existingItems: string[] = [];
+				if (blockMatch[1]) {
+					const inlineVal = blockMatch[1].trim();
+					if (inlineVal !== '[]') {
+						try {
+							const parsed = JSON.parse(inlineVal);
+							if (Array.isArray(parsed)) {
+								for (const item of parsed) {
+									if (typeof item === 'string' && item.trim()) {
+										existingItems.push(item.trim());
+									}
+								}
+							}
+						} catch {
+							const linkMatches = inlineVal.match(/\[\[.*?\]\]/g) || [];
+							existingItems.push(...linkMatches);
+						}
+					}
+				} else if (blockMatch[2]) {
+					const lines = blockMatch[2].split(/\r?\n/);
+					for (const line of lines) {
+						const m = line.match(/^[ \t]*-[ \t]+(.*?)\s*$/);
+						if (m && m[1]) {
+							existingItems.push(m[1].replace(/^["']|["']$/g, '').trim());
+						}
+					}
+				}
+
+				const filteredItems = existingItems.filter(
+					(item) =>
+						!item.includes(`[[${childBasename}|`) &&
+						!item.includes(`[[${childBasename}]]`),
+				);
+
+				if (filteredItems.length !== existingItems.length) {
+					const yamlList =
+						filteredItems.length > 0
+							? `subtaskIds:\n${filteredItems.map((it) => `  - "${it}"`).join('\n')}`
+							: `subtaskIds: []`;
+					fmText = fmText.replace(subtaskBlockRegex, yamlList);
+					content = content.replace(fmRegex, `---\n${fmText}\n---`);
+					changed = true;
+				}
+			}
+		}
+
+		// Remove from body checklist
+		const escapedBase = childBasename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		const lineRegex = new RegExp(`^[ \\t]*-[ \\t]*\\[[xX ]\\][ \\t]*\\[\\[${escapedBase}(?:\\|[^\\]]*)?\\]\\][^\\r\\n]*\\r?\\n?`, 'gm');
+		const newContent = content.replace(lineRegex, '');
+		if (newContent !== content) {
+			content = newContent;
+			changed = true;
+		}
+
+		if (changed) {
+			await this.app.vault.modify(parentFile, content);
+		}
+	}
+
 	async findParentSectionTask(courseId: string | number, cleanTitle: string, assignment: any): Promise<{ file: TFile; basename: string; title: string } | null> {
 		const courseIdStr = String(courseId);
 		const folder = this.app.vault.getAbstractFileByPath(this.settings.outputFolder);
@@ -966,8 +1037,27 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
 			const subtaskFileName = `${fullSubtaskBasename}.md`;
 			const subtaskPath = `${this.settings.outputFolder}/${subtaskFileName}`;
 
-			// Check if an earlier week in the same course already has a subtask for this exact sectionNum
+			// Find if existingSubtask for the current week already exists
+			let existingSubtask: TFile | null = null;
+			const directSubtask = this.app.vault.getAbstractFileByPath(subtaskPath);
+			if (directSubtask && directSubtask instanceof TFile) {
+				existingSubtask = directSubtask;
+			} else {
+				for (const f of this.app.vault.getMarkdownFiles()) {
+					const cache = this.app.metadataCache.getFileCache(f);
+					if (cache?.frontmatter?.id === subtaskId) {
+						existingSubtask = f;
+						break;
+					}
+				}
+			}
+
+			const rawProblems: string[] = (item.problems || []).map((p: string) => String(p).trim());
+			const rawProblemSet = new Set<string>(rawProblems);
+
 			const earlierProblems = new Set<string>();
+			const carriedOverChecked = new Set<string>();
+			let skipBecauseCarriedToLaterWeek = false;
 			let hasTitleCollision = false;
 
 			for (const f of this.app.vault.getMarkdownFiles()) {
@@ -975,12 +1065,7 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
 				if (!fm || !fm.id || fm.id === subtaskId) continue;
 
 				const fmId = String(fm.id);
-				if (fm.title === baseSubtaskTitle) {
-					hasTitleCollision = true;
-				}
-
 				if (fmId.startsWith(coursePrefix) && fmId.endsWith(`:subtask:${sectionNum}`)) {
-					// Determine if `f` belongs to an earlier week than the current section
 					const otherParent = String(fm.parentId || f.basename);
 					const otherWeekMatch = otherParent.match(/\bweek[\s-]*0?(\d+)\b/i) || String(fm.title || '').match(/\bweek[\s-]*0?(\d+)\b/i);
 					const otherWeekNum = otherWeekMatch ? parseInt(otherWeekMatch[1], 10) : null;
@@ -990,33 +1075,84 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
 					const isEarlier =
 						(currentWeekMatch !== null && otherWeekNum !== null && otherWeekNum < currentWeekMatch) ||
 						(otherWeekNum === null && otherDue && curDue && otherDue < curDue);
+					const isLater =
+						(currentWeekMatch !== null && otherWeekNum !== null && otherWeekNum > currentWeekMatch) ||
+						(otherWeekNum === null && otherDue && curDue && otherDue > curDue);
 
-					if (isEarlier) {
-						hasTitleCollision = true;
-						const otherContent = await this.app.vault.read(f);
-						const probRegex = /^-\s*\[[xX ]\]\s*Problem\s+(.+)$/gm;
-						let m: RegExpExecArray | null;
-						while ((m = probRegex.exec(otherContent)) !== null) {
-							earlierProblems.add(m[1].trim());
+					const otherContent = await this.app.vault.read(f);
+					const otherProbs: string[] = [];
+					const otherChecked = new Set<string>();
+					const probRegex = /^-\s*\[([xX ])\]\s*Problem\s+(.+?)(?:\s*✅.*)?$/gm;
+					let m: RegExpExecArray | null;
+					while ((m = probRegex.exec(otherContent)) !== null) {
+						const pNum = m[2].trim();
+						otherProbs.push(pNum);
+						if (m[1].toLowerCase() === 'x') {
+							otherChecked.add(pNum);
 						}
 					}
+
+					const otherIsDone =
+						String(fm.status || '').toLowerCase() === 'done' ||
+						(otherProbs.length > 0 && otherChecked.size === otherProbs.length);
+
+					if (isEarlier) {
+						// Check if all earlier problems are included in the current week's problem list (carried-over topic)
+						const isCarriedOverSubset =
+							otherProbs.length > 0 && otherProbs.every((p) => rawProblemSet.has(p));
+
+						if (!otherIsDone && isCarriedOverSubset) {
+							// Carry over ("Sarkan Konu"): remove unfinished subtask from the earlier week and move to current week!
+							for (const cp of otherChecked) carriedOverChecked.add(cp);
+							const otherSectionId = fmId.split(':')[2];
+							const otherParentId = `section:${assignment.courseId}:${otherSectionId}`;
+							for (const pf of this.app.vault.getMarkdownFiles()) {
+								const pfm = this.app.metadataCache.getFileCache(pf)?.frontmatter;
+								if (pfm && String(pfm.id) === otherParentId) {
+									await this.unlinkChildFromParent(pf, f.basename);
+									break;
+								}
+							}
+							await this.app.vault.delete(f);
+						} else {
+							// Earlier subtask is either already 'done' OR had distinct problems (part 1 vs part 2)
+							for (const p of otherProbs) earlierProblems.add(p);
+							hasTitleCollision = true;
+						}
+					} else if (isLater) {
+						// If a later week already has these exact problems and the current week's subtask is not done,
+						// then this topic has already carried over to the later week.
+						const otherProbSet = new Set(otherProbs);
+						const allInLater = rawProblems.length > 0 && rawProblems.every((p) => otherProbSet.has(p));
+						const currentIsDone =
+							existingSubtask &&
+							String(this.app.metadataCache.getFileCache(existingSubtask)?.frontmatter?.status || '').toLowerCase() === 'done';
+						if (allInLater && !currentIsDone) {
+							skipBecauseCarriedToLaterWeek = true;
+						}
+					}
+				} else if (fm.title === baseSubtaskTitle) {
+					hasTitleCollision = true;
 				}
 			}
 
-			const rawProblems: string[] = item.problems || [];
 			const effectiveProblems = earlierProblems.size > 0
-				? rawProblems.filter((p: string) => !earlierProblems.has(String(p).trim()))
+				? rawProblems.filter((p: string) => !earlierProblems.has(p))
 				: rawProblems;
 
-			// If all problems in this section were already assigned in an earlier week, skip creating a duplicate subtask
-			if (earlierProblems.size > 0 && effectiveProblems.length === 0) {
+			// Skip if carried over to a later week, or if all problems were already completed in an earlier week
+			if (skipBecauseCarriedToLaterWeek || (earlierProblems.size > 0 && effectiveProblems.length === 0)) {
+				if (existingSubtask) {
+					await this.unlinkChildFromParent(parentFile, existingSubtask.basename);
+					await this.app.vault.delete(existingSubtask);
+				}
 				continue;
 			}
 
 			const subtaskTitle = hasTitleCollision && weekPrefix ? `${weekPrefix}${baseSubtaskTitle}` : baseSubtaskTitle;
 
 			const problemsList = effectiveProblems
-				.map((p: string) => `- [ ] Problem ${p}`)
+				.map((p: string) => `- [${carriedOverChecked.has(p) ? 'x' : ' '}] Problem ${p}`)
 				.join('\n');
 
 			const subtaskData: Record<string, any> = {
@@ -1033,22 +1169,6 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
 			for (const key of Object.keys(subtaskData)) {
 				const regex = new RegExp(`\\{\\{${key}\\}\\}`, 'g');
 				renderedSubtask = renderedSubtask.replace(regex, String(subtaskData[key] ?? ''));
-			}
-
-			// 1. Find existing subtask by ID first, then fallback to subtaskPath
-			let existingSubtask: TFile | null = null;
-			const directSubtask = this.app.vault.getAbstractFileByPath(subtaskPath);
-			if (directSubtask && directSubtask instanceof TFile) {
-				existingSubtask = directSubtask;
-			} else {
-				const mdFiles = this.app.vault.getMarkdownFiles();
-				for (const f of mdFiles) {
-					const cache = this.app.metadataCache.getFileCache(f);
-					if (cache?.frontmatter?.id === subtaskId) {
-						existingSubtask = f;
-						break;
-					}
-				}
 			}
 
 			if (!existingSubtask) {
