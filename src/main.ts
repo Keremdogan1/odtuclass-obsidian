@@ -956,12 +956,23 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
 		for (const item of assignment.suggestedProblems) {
 			const sectionNum = item.section;
 			const topicTitle = item.title ? ` ${item.title}` : '';
-			const subtaskTitle = `${sectionNum}${topicTitle} — Suggested Problems`;
+			const baseSubtaskTitle = `${sectionNum}${topicTitle} — Suggested Problems`;
 			const subtaskId = `${assignment.id}:subtask:${sectionNum}`;
-			const safeSubtaskTitle = subtaskTitle.replace(/[\\/:*?"<>|\[\]]/g, '-').trim();
+			const safeSubtaskTitle = baseSubtaskTitle.replace(/[\\/:*?"<>|\[\]]/g, '-').trim();
 			const fullSubtaskBasename = `${weekPrefix}${safeSubtaskTitle}`;
 			const subtaskFileName = `${fullSubtaskBasename}.md`;
 			const subtaskPath = `${this.settings.outputFolder}/${subtaskFileName}`;
+
+			// Check if another subtask from a different week already uses baseSubtaskTitle
+			let hasTitleCollision = false;
+			for (const f of this.app.vault.getMarkdownFiles()) {
+				const fm = this.app.metadataCache.getFileCache(f)?.frontmatter;
+				if (fm && fm.id && fm.id !== subtaskId && fm.title === baseSubtaskTitle) {
+					hasTitleCollision = true;
+					break;
+				}
+			}
+			const subtaskTitle = hasTitleCollision && weekPrefix ? `${weekPrefix}${baseSubtaskTitle}` : baseSubtaskTitle;
 
 			const problemsList = (item.problems || [])
 				.map((p: string) => `- [ ] Problem ${p}`)

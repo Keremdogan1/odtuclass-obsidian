@@ -1172,7 +1172,7 @@ $&`);
     });
   }
   async processSubtasks(assignment, parentFile, parentCleanTitle) {
-    var _a, _b;
+    var _a, _b, _c;
     const subtaskTemplatePath = `${this.settings.templateFolder}/Subtask.md`;
     const subtaskTemplateFile = this.app.vault.getAbstractFileByPath(subtaskTemplatePath);
     let subtaskTemplateContent = "";
@@ -1215,12 +1215,21 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
     for (const item of assignment.suggestedProblems) {
       const sectionNum = item.section;
       const topicTitle = item.title ? ` ${item.title}` : "";
-      const subtaskTitle = `${sectionNum}${topicTitle} \u2014 Suggested Problems`;
+      const baseSubtaskTitle = `${sectionNum}${topicTitle} \u2014 Suggested Problems`;
       const subtaskId = `${assignment.id}:subtask:${sectionNum}`;
-      const safeSubtaskTitle = subtaskTitle.replace(/[\\/:*?"<>|\[\]]/g, "-").trim();
+      const safeSubtaskTitle = baseSubtaskTitle.replace(/[\\/:*?"<>|\[\]]/g, "-").trim();
       const fullSubtaskBasename = `${weekPrefix}${safeSubtaskTitle}`;
       const subtaskFileName = `${fullSubtaskBasename}.md`;
       const subtaskPath = `${this.settings.outputFolder}/${subtaskFileName}`;
+      let hasTitleCollision = false;
+      for (const f of this.app.vault.getMarkdownFiles()) {
+        const fm = (_a = this.app.metadataCache.getFileCache(f)) == null ? void 0 : _a.frontmatter;
+        if (fm && fm.id && fm.id !== subtaskId && fm.title === baseSubtaskTitle) {
+          hasTitleCollision = true;
+          break;
+        }
+      }
+      const subtaskTitle = hasTitleCollision && weekPrefix ? `${weekPrefix}${baseSubtaskTitle}` : baseSubtaskTitle;
       const problemsList = (item.problems || []).map((p) => `- [ ] Problem ${p}`).join("\n");
       const subtaskData = {
         id: subtaskId,
@@ -1234,7 +1243,7 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
       let renderedSubtask = subtaskTemplateContent;
       for (const key of Object.keys(subtaskData)) {
         const regex = new RegExp(`\\{\\{${key}\\}\\}`, "g");
-        renderedSubtask = renderedSubtask.replace(regex, String((_a = subtaskData[key]) != null ? _a : ""));
+        renderedSubtask = renderedSubtask.replace(regex, String((_b = subtaskData[key]) != null ? _b : ""));
       }
       let existingSubtask = null;
       const directSubtask = this.app.vault.getAbstractFileByPath(subtaskPath);
@@ -1244,7 +1253,7 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
         const mdFiles = this.app.vault.getMarkdownFiles();
         for (const f of mdFiles) {
           const cache = this.app.metadataCache.getFileCache(f);
-          if (((_b = cache == null ? void 0 : cache.frontmatter) == null ? void 0 : _b.id) === subtaskId) {
+          if (((_c = cache == null ? void 0 : cache.frontmatter) == null ? void 0 : _c.id) === subtaskId) {
             existingSubtask = f;
             break;
           }
