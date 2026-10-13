@@ -623,7 +623,7 @@ export default class ODTUClassPlugin extends Plugin {
 		const bracketMatch = courseName.match(/^\[(.*?)\]\s*(.*)$/);
 		if (bracketMatch) {
 			const codePart = bracketMatch[1]
-				.replace(/\s+(?:All\s+Sections?|Sections?\s*\d+)/i, '')
+				.replace(/\s+(?:All\s+Sec(?:tion|iton)s?|Sec(?:tion|iton)s?\s*\d+)/i, '')
 				.trim();
 			const titlePart = bracketMatch[2].trim();
 			cleanCourseName = `${codePart} - ${titlePart}`;
@@ -767,7 +767,8 @@ odtuclass-course: "${courseName}"
 						: `subtaskIds: []`;
 
 				if (blockMatch) {
-					fmText = fmText.replace(subtaskBlockRegex, yamlList);
+					const replacement = blockMatch[0].endsWith('\n') ? `${yamlList}\n` : yamlList;
+					fmText = fmText.replace(subtaskBlockRegex, replacement);
 				} else {
 					fmText = `${fmText.trimEnd()}\n${yamlList}`;
 				}
@@ -872,7 +873,8 @@ odtuclass-course: "${courseName}"
 						filteredItems.length > 0
 							? `subtaskIds:\n${filteredItems.map((it) => `  - "${it}"`).join('\n')}`
 							: `subtaskIds: []`;
-					fmText = fmText.replace(subtaskBlockRegex, yamlList);
+					const replacement = blockMatch[0].endsWith('\n') ? `${yamlList}\n` : yamlList;
+					fmText = fmText.replace(subtaskBlockRegex, replacement);
 					content = content.replace(fmRegex, `---\n${fmText}\n---`);
 					changed = true;
 				}

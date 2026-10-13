@@ -1411,7 +1411,7 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
     let cleanCourseName = courseName;
     const bracketMatch = courseName.match(/^\[(.*?)\]\s*(.*)$/);
     if (bracketMatch) {
-      const codePart = bracketMatch[1].replace(/\s+(?:All\s+Sections?|Sections?\s*\d+)/i, "").trim();
+      const codePart = bracketMatch[1].replace(/\s+(?:All\s+Sec(?:tion|iton)s?|Sec(?:tion|iton)s?\s*\d+)/i, "").trim();
       const titlePart = bracketMatch[2].trim();
       cleanCourseName = `${codePart} - ${titlePart}`;
     }
@@ -1536,7 +1536,9 @@ odtuclass-course: "${courseName}"
         const yamlList = existingItems.length > 0 ? `subtaskIds:
 ${existingItems.map((it) => `  - "${it}"`).join("\n")}` : `subtaskIds: []`;
         if (blockMatch) {
-          fmText = fmText.replace(subtaskBlockRegex, yamlList);
+          const replacement = blockMatch[0].endsWith("\n") ? `${yamlList}
+` : yamlList;
+          fmText = fmText.replace(subtaskBlockRegex, replacement);
         } else {
           fmText = `${fmText.trimEnd()}
 ${yamlList}`;
@@ -1639,7 +1641,9 @@ ${subtasksEndMarker}
         if (filteredItems.length !== existingItems.length) {
           const yamlList = filteredItems.length > 0 ? `subtaskIds:
 ${filteredItems.map((it) => `  - "${it}"`).join("\n")}` : `subtaskIds: []`;
-          fmText = fmText.replace(subtaskBlockRegex, yamlList);
+          const replacement = blockMatch[0].endsWith("\n") ? `${yamlList}
+` : yamlList;
+          fmText = fmText.replace(subtaskBlockRegex, replacement);
           content = content.replace(fmRegex, `---
 ${fmText}
 ---`);
