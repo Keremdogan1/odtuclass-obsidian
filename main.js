@@ -1031,8 +1031,13 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
   onunload() {
   }
   async loadSettings() {
-    const loaded = await this.loadData();
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
+    let loaded = null;
+    try {
+      loaded = await this.loadData();
+    } catch (e) {
+      console.warn("[ODTUClass] Could not parse data.json, falling back to defaults:", e);
+    }
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded || {});
     this.settings.courseSlideConfigs = Object.assign(
       {},
       DEFAULT_SETTINGS.courseSlideConfigs,

@@ -178,8 +178,13 @@ export default class ODTUClassPlugin extends Plugin {
 	onunload() { }
 
 	async loadSettings() {
-		const loaded = await this.loadData();
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
+		let loaded: any = null;
+		try {
+			loaded = await this.loadData();
+		} catch (e) {
+			console.warn('[ODTUClass] Could not parse data.json, falling back to defaults:', e);
+		}
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded || {});
 		this.settings.courseSlideConfigs = Object.assign(
 			{},
 			DEFAULT_SETTINGS.courseSlideConfigs,
