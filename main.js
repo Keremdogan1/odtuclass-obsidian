@@ -246,6 +246,25 @@ async function syncFromGithub(plugin) {
             continue;
           }
         }
+        if (data.type === "syllabus") {
+          const res2 = await plugin.processSyllabus(data, owner, repo, token);
+          if (res2) {
+            createdCount++;
+            historyItems.push({
+              action: "created",
+              title: `${res2.courseCode} D\xF6nem \u0130zlencesi (Syllabus)`,
+              courseCode: res2.courseCode,
+              filePath: res2.filePath,
+              detail: "Syllabus PDF indirildi ve About Course.md g\xFCncellendi"
+            });
+            state[realId] = {
+              processedAt: new Date().toISOString(),
+              contentHash: data.contentHash
+            };
+            stateChanged = true;
+          }
+          continue;
+        }
         const res = await plugin.processAssignment(data, false);
         if (res) {
           if (res.action === "filtered") {
@@ -2459,6 +2478,184 @@ ${descEnd}`
       );
     }
     return result;
+  }
+  async processSyllabus(data, owner, repo, token) {
+    const rawCode = String(
+      data.courseCode || this.extractCanonicalCourseCode(data.courseName) || "COURSE"
+    );
+    const courseCode = rawCode.replace(/\s+/g, "").toUpperCase();
+    const courseDir = `Courses/${courseCode}`;
+    const adapter = this.app.vault.adapter;
+    if (!await adapter.exists(courseDir)) {
+      await this.createFolderRecursive(courseDir);
+    }
+    const pdfFilename = "Syllabus 2026 Fall.pdf";
+    const targetPdfPath = `${courseDir}/${pdfFilename}`;
+    const fileApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/syllabi/${encodeURIComponent(courseCode)}/Syllabus.pdf`;
+    try {
+      const pdfRes = await (0, import_obsidian2.requestUrl)({
+        url: fileApiUrl,
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github.v3.raw",
+          "User-Agent": "Obsidian-ODTUClass-Plugin"
+        },
+        throw: false
+      });
+      if (pdfRes && pdfRes.status === 200 && pdfRes.arrayBuffer) {
+        await adapter.writeBinary(targetPdfPath, pdfRes.arrayBuffer);
+      }
+    } catch (err) {
+      console.warn(`[ODTUClass] Could not download syllabus PDF from GitHub:`, err);
+    }
+    const aboutCoursePath = `${courseDir}/About Course.md`;
+    const extracted = data.extracted || {};
+    let syllabusMd = `## 2026-2027 Fall (D\xF6nem \u0130zlencesi & Bilgileri)
+
+`;
+    syllabusMd += `> [!info] Ders \u0130zlencesi (Syllabus)
+`;
+    syllabusMd += `> \u{1F4C4} **Resmi Belge:** [[${pdfFilename}|2026 G\xFCz D\xF6nem \u0130zlencesi (PDF)]]
+`;
+    if (extracted.summary) {
+      syllabusMd += `> **\xD6zet:** ${extracted.summary}
+`;
+    }
+    syllabusMd += `
+`;
+    if (Array.isArray(extracted.exams) && extracted.exams.length > 0) {
+      syllabusMd += `### S\u0131nav Tarihleri & Takvim
+`;
+      syllabusMd += `| S\u0131nav | Tarih | Saat | A\u011F\u0131rl\u0131k | Yer / Notlar |
+`;
+      syllabusMd += `| :--- | :---: | :---: | :---: | :--- |
+`;
+      for (const exam of extracted.exams) {
+        const title = exam.title || "S\u0131nav";
+        const date = exam.date || "Belirlenecek";
+        const time = exam.time || "-";
+        const weight = exam.weight || "-";
+        const loc = [exam.location, exam.notes].filter(Boolean).join(" - ") || "-";
+        syllabusMd += `| ${title} | ${date} | ${time} | ${weight} | ${loc} |
+`;
+      }
+      syllabusMd += `
+`;
+    }
+    if (Array.isArray(extracted.grading) && extracted.grading.length > 0) {
+      syllabusMd += `### Notland\u0131rma Kriterleri & A\u011F\u0131rl\u0131klar
+`;
+      syllabusMd += `| Bile\u015Fen | A\u011F\u0131rl\u0131k | Ko\u015Ful / Notlar |
+`;
+      syllabusMd += `| :--- | :---: | :--- |
+`;
+      for (const g of extracted.grading) {
+        syllabusMd += `| ${g.component || "-"} | ${g.weight || "-"} | ${g.notes || "-"} |
+`;
+      }
+      syllabusMd += `
+`;
+    }
+    if (Array.isArray(extracted.weeklySchedule) && extracted.weeklySchedule.length > 0) {
+      syllabusMd += `### Haftal\u0131k Konu Takvimi
+`;
+      syllabusMd += `| Hafta | Tarih | Konu | Kaynak / Okuma |
+`;
+      syllabusMd += `| :---: | :---: | :--- | :--- |
+`;
+      for (const w of extracted.weeklySchedule) {
+        syllabusMd += `| ${w.week || "-"} | ${w.dates || "-"} | ${w.topic || "-"} | ${w.readings || "-"} |
+`;
+      }
+      syllabusMd += `
+`;
+    }
+    if (Array.isArray(extracted.textbooks) && extracted.textbooks.length > 0) {
+      syllabusMd += `### Kaynak Kitaplar & Materyaller
+`;
+      for (const tb of extracted.textbooks) {
+        syllabusMd += `- \u{1F4DA} ${tb}
+`;
+      }
+      syllabusMd += `
+`;
+    }
+    if (Array.isArray(extracted.instructors) && extracted.instructors.length > 0) {
+      syllabusMd += `### Ders Koordinat\xF6r\xFC & E\u011Fitmenler
+`;
+      for (const inst of extracted.instructors) {
+        const details = [inst.role, inst.email, inst.office].filter(Boolean).join(" | ");
+        syllabusMd += `- \u{1F464} **${inst.name}**${details ? ` (${details})` : ""}
+`;
+      }
+      syllabusMd += `
+`;
+    }
+    syllabusMd += `---
+`;
+    if (await adapter.exists(aboutCoursePath)) {
+      let currentContent = await adapter.read(aboutCoursePath);
+      const sectionRegex = /##\s*2026-2027\s*Fall[\s\S]*?(?=(?:\r?\n##\s+[^\r\n]+|$))/i;
+      if (sectionRegex.test(currentContent)) {
+        currentContent = currentContent.replace(sectionRegex, syllabusMd.trim() + "\n\n");
+      } else {
+        const yamlMatch = currentContent.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/);
+        if (yamlMatch) {
+          const rest = currentContent.slice(yamlMatch[0].length);
+          const h1Match = rest.match(/^#[^\r\n]+\r?\n+/);
+          if (h1Match) {
+            const insertPos = yamlMatch[0].length + h1Match[0].length;
+            currentContent = currentContent.slice(0, insertPos) + "\n" + syllabusMd + "\n" + currentContent.slice(insertPos);
+          } else {
+            currentContent = yamlMatch[0] + "\n" + syllabusMd + "\n" + rest;
+          }
+        } else {
+          currentContent = syllabusMd + "\n\n" + currentContent;
+        }
+      }
+      await adapter.write(aboutCoursePath, currentContent);
+    } else {
+      const newContent = `---
+title: ${courseCode} - Genel Bilgi ve \u0130zlence
+ders: ${courseCode}
+tags:
+  - ${courseCode}
+  - ders-notu
+  - syllabus
+---
+
+# ${courseCode} \u2014 ${data.courseName || ""}
+
+${syllabusMd}
+`;
+      await adapter.write(aboutCoursePath, newContent);
+    }
+    if (Array.isArray(extracted.exams)) {
+      for (const exam of extracted.exams) {
+        if (exam.date && /^\d{4}-\d{2}-\d{2}$/.test(exam.date)) {
+          try {
+            const examTaskPayload = {
+              id: `exam:${courseCode}:${(exam.title || "exam").replace(/[^a-zA-Z0-9]+/g, "-").toLowerCase()}`,
+              type: "assignment",
+              courseId: data.courseId,
+              courseName: data.courseName,
+              title: `${courseCode} - ${exam.title || "Exam"}`,
+              dueAt: exam.time ? `${exam.date}T${exam.time}:00.000Z` : `${exam.date}T23:59:00.000Z`,
+              description: `S\u0131nav: ${exam.title}
+A\u011F\u0131rl\u0131k: ${exam.weight || ""}
+Yer: ${exam.location || ""}
+Notlar: ${exam.notes || ""}`,
+              event: "created"
+            };
+            await this.processAssignment(examTaskPayload, false);
+          } catch (tErr) {
+            console.warn(`[ODTUClass] Error creating exam task:`, tErr);
+          }
+        }
+      }
+    }
+    return { courseCode, filePath: aboutCoursePath };
   }
 };
 var SetupWizardModal = class extends import_obsidian2.Modal {

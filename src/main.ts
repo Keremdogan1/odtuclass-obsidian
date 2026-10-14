@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder } from 'obsidian';
+import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, requestUrl } from 'obsidian';
 import {
 	CourseSlideConfig,
 	RemoteSyncConfig,
@@ -1856,6 +1856,192 @@ Parent: [[{{parentFileName}}|{{parentTitle}}]]
 		}
 
 		return result;
+	}
+
+	async processSyllabus(
+		data: any,
+		owner: string,
+		repo: string,
+		token: string,
+	): Promise<{ courseCode: string; filePath: string } | null> {
+		const rawCode = String(
+			data.courseCode ||
+				this.extractCanonicalCourseCode(data.courseName) ||
+				'COURSE',
+		);
+		const courseCode = rawCode.replace(/\s+/g, '').toUpperCase();
+		const courseDir = `Courses/${courseCode}`;
+		const adapter = this.app.vault.adapter;
+
+		if (!(await adapter.exists(courseDir))) {
+			await this.createFolderRecursive(courseDir);
+		}
+
+		// 1. Download Syllabus PDF
+		const pdfFilename = 'Syllabus 2026 Fall.pdf';
+		const targetPdfPath = `${courseDir}/${pdfFilename}`;
+		const fileApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.odtuclass/syllabi/${encodeURIComponent(courseCode)}/Syllabus.pdf`;
+
+		try {
+			const pdfRes = await requestUrl({
+				url: fileApiUrl,
+				method: 'GET',
+				headers: {
+					Authorization: `Bearer ${token}`,
+					Accept: 'application/vnd.github.v3.raw',
+					'User-Agent': 'Obsidian-ODTUClass-Plugin',
+				},
+				throw: false,
+			});
+
+			if (pdfRes && pdfRes.status === 200 && pdfRes.arrayBuffer) {
+				await adapter.writeBinary(targetPdfPath, pdfRes.arrayBuffer);
+			}
+		} catch (err) {
+			console.warn(`[ODTUClass] Could not download syllabus PDF from GitHub:`, err);
+		}
+
+		// 2. Format About Course.md section
+		const aboutCoursePath = `${courseDir}/About Course.md`;
+		const extracted = data.extracted || {};
+
+		let syllabusMd = `## 2026-2027 Fall (Dönem İzlencesi & Bilgileri)\n\n`;
+		syllabusMd += `> [!info] Ders İzlencesi (Syllabus)\n`;
+		syllabusMd += `> 📄 **Resmi Belge:** [[${pdfFilename}|2026 Güz Dönem İzlencesi (PDF)]]\n`;
+		if (extracted.summary) {
+			syllabusMd += `> **Özet:** ${extracted.summary}\n`;
+		}
+		syllabusMd += `\n`;
+
+		// Sınavlar
+		if (Array.isArray(extracted.exams) && extracted.exams.length > 0) {
+			syllabusMd += `### Sınav Tarihleri & Takvim\n`;
+			syllabusMd += `| Sınav | Tarih | Saat | Ağırlık | Yer / Notlar |\n`;
+			syllabusMd += `| :--- | :---: | :---: | :---: | :--- |\n`;
+			for (const exam of extracted.exams) {
+				const title = exam.title || 'Sınav';
+				const date = exam.date || 'Belirlenecek';
+				const time = exam.time || '-';
+				const weight = exam.weight || '-';
+				const loc = [exam.location, exam.notes].filter(Boolean).join(' - ') || '-';
+				syllabusMd += `| ${title} | ${date} | ${time} | ${weight} | ${loc} |\n`;
+			}
+			syllabusMd += `\n`;
+		}
+
+		// Notlandırma Kriterleri
+		if (Array.isArray(extracted.grading) && extracted.grading.length > 0) {
+			syllabusMd += `### Notlandırma Kriterleri & Ağırlıklar\n`;
+			syllabusMd += `| Bileşen | Ağırlık | Koşul / Notlar |\n`;
+			syllabusMd += `| :--- | :---: | :--- |\n`;
+			for (const g of extracted.grading) {
+				syllabusMd += `| ${g.component || '-'} | ${g.weight || '-'} | ${g.notes || '-'} |\n`;
+			}
+			syllabusMd += `\n`;
+		}
+
+		// Haftalık Ders Planı
+		if (Array.isArray(extracted.weeklySchedule) && extracted.weeklySchedule.length > 0) {
+			syllabusMd += `### Haftalık Konu Takvimi\n`;
+			syllabusMd += `| Hafta | Tarih | Konu | Kaynak / Okuma |\n`;
+			syllabusMd += `| :---: | :---: | :--- | :--- |\n`;
+			for (const w of extracted.weeklySchedule) {
+				syllabusMd += `| ${w.week || '-'} | ${w.dates || '-'} | ${w.topic || '-'} | ${w.readings || '-'} |\n`;
+			}
+			syllabusMd += `\n`;
+		}
+
+		// Kaynak Kitaplar
+		if (Array.isArray(extracted.textbooks) && extracted.textbooks.length > 0) {
+			syllabusMd += `### Kaynak Kitaplar & Materyaller\n`;
+			for (const tb of extracted.textbooks) {
+				syllabusMd += `- 📚 ${tb}\n`;
+			}
+			syllabusMd += `\n`;
+		}
+
+		// Instructors
+		if (Array.isArray(extracted.instructors) && extracted.instructors.length > 0) {
+			syllabusMd += `### Ders Koordinatörü & Eğitmenler\n`;
+			for (const inst of extracted.instructors) {
+				const details = [inst.role, inst.email, inst.office].filter(Boolean).join(' | ');
+				syllabusMd += `- 👤 **${inst.name}**${details ? ` (${details})` : ''}\n`;
+			}
+			syllabusMd += `\n`;
+		}
+
+		syllabusMd += `---\n`;
+
+		// 3. Insert or update in About Course.md
+		if (await adapter.exists(aboutCoursePath)) {
+			let currentContent = await adapter.read(aboutCoursePath);
+			const sectionRegex = /##\s*2026-2027\s*Fall[\s\S]*?(?=(?:\r?\n##\s+[^\r\n]+|$))/i;
+			if (sectionRegex.test(currentContent)) {
+				currentContent = currentContent.replace(sectionRegex, syllabusMd.trim() + '\n\n');
+			} else {
+				// Insert after YAML or first heading
+				const yamlMatch = currentContent.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/);
+				if (yamlMatch) {
+					const rest = currentContent.slice(yamlMatch[0].length);
+					const h1Match = rest.match(/^#[^\r\n]+\r?\n+/);
+					if (h1Match) {
+						const insertPos = yamlMatch[0].length + h1Match[0].length;
+						currentContent =
+							currentContent.slice(0, insertPos) +
+							'\n' +
+							syllabusMd +
+							'\n' +
+							currentContent.slice(insertPos);
+					} else {
+						currentContent = yamlMatch[0] + '\n' + syllabusMd + '\n' + rest;
+					}
+				} else {
+					currentContent = syllabusMd + '\n\n' + currentContent;
+				}
+			}
+			await adapter.write(aboutCoursePath, currentContent);
+		} else {
+			// Create new About Course.md
+			const newContent = `---
+title: ${courseCode} - Genel Bilgi ve İzlence
+ders: ${courseCode}
+tags:
+  - ${courseCode}
+  - ders-notu
+  - syllabus
+---
+
+# ${courseCode} — ${data.courseName || ''}
+
+${syllabusMd}
+`;
+			await adapter.write(aboutCoursePath, newContent);
+		}
+
+		// 4. Create tasks for exams with specific dates
+		if (Array.isArray(extracted.exams)) {
+			for (const exam of extracted.exams) {
+				if (exam.date && /^\d{4}-\d{2}-\d{2}$/.test(exam.date)) {
+					try {
+						const examTaskPayload = {
+							id: `exam:${courseCode}:${(exam.title || 'exam').replace(/[^a-zA-Z0-9]+/g, '-').toLowerCase()}`,
+							type: 'assignment',
+							courseId: data.courseId,
+							courseName: data.courseName,
+							title: `${courseCode} - ${exam.title || 'Exam'}`,
+							dueAt: exam.time ? `${exam.date}T${exam.time}:00.000Z` : `${exam.date}T23:59:00.000Z`,
+							description: `Sınav: ${exam.title}\nAğırlık: ${exam.weight || ''}\nYer: ${exam.location || ''}\nNotlar: ${exam.notes || ''}`,
+							event: 'created',
+						};
+						await this.processAssignment(examTaskPayload, false);
+					} catch (tErr) {
+						console.warn(`[ODTUClass] Error creating exam task:`, tErr);
+					}
+				}
+			}
+		}
+
+		return { courseCode, filePath: aboutCoursePath };
 	}
 }
 

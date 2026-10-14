@@ -327,6 +327,26 @@ export async function syncFromGithub(plugin: any): Promise<void> {
 					}
 				}
 
+				if (data.type === 'syllabus') {
+					const res = await plugin.processSyllabus(data, owner, repo, token);
+					if (res) {
+						createdCount++;
+						historyItems.push({
+							action: 'created',
+							title: `${res.courseCode} Dönem İzlencesi (Syllabus)`,
+							courseCode: res.courseCode,
+							filePath: res.filePath,
+							detail: 'Syllabus PDF indirildi ve About Course.md güncellendi'
+						});
+						state[realId] = {
+							processedAt: new Date().toISOString(),
+							contentHash: data.contentHash,
+						};
+						stateChanged = true;
+					}
+					continue;
+				}
+
 				const res = await plugin.processAssignment(data, false);
 				if (res) {
 					if (res.action === 'filtered') {
