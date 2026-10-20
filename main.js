@@ -518,6 +518,41 @@ async function syncAllCourseSlidesFromGithub(plugin, owner, repo, token) {
           replaced++;
         }
       }
+      if (!/pre-?lecture/i.test(targetFilename) && await adapter.exists(targetPath)) {
+        const prelectureFilename = targetFilename.replace(/\.pdf$/i, " Prelecture.pdf");
+        const prelecturePath = `${slidesDir}/${prelectureFilename}`;
+        const prelectureAnnotPath = `${prelecturePath}.annot.json`;
+        const targetAnnotPath = `${targetPath}.annot.json`;
+        if (await adapter.exists(prelectureAnnotPath) && !await adapter.exists(targetAnnotPath)) {
+          try {
+            const annotStr = await adapter.read(prelectureAnnotPath);
+            const annotObj = JSON.parse(annotStr);
+            const targetStat = await adapter.stat(targetPath);
+            const targetBasename = targetFilename.replace(/\.pdf$/i, "");
+            annotObj.sourceFile = targetPath;
+            if (annotObj.sourcePdf && typeof annotObj.sourcePdf === "object") {
+              annotObj.sourcePdf.path = targetPath;
+              annotObj.sourcePdf.name = targetFilename;
+              annotObj.sourcePdf.basename = targetBasename;
+              if (targetStat) {
+                annotObj.sourcePdf.size = targetStat.size;
+                annotObj.sourcePdf.mtime = targetStat.mtime;
+              }
+            }
+            await adapter.write(targetAnnotPath, JSON.stringify(annotObj, null, 2));
+            console.log(`[ODTUClass] Migrated Freedraw annotations from ${prelectureAnnotPath} to ${targetAnnotPath}`);
+            items.push({
+              action: "slide",
+              title: targetFilename,
+              courseCode,
+              filePath: targetAnnotPath,
+              detail: "Prelecture notlar\u0131 yeni slayta aktar\u0131ld\u0131"
+            });
+          } catch (migErr) {
+            console.warn(`[ODTUClass] Could not migrate prelecture annotations:`, migErr);
+          }
+        }
+      }
       const numMatch = targetFilename.match(/^(\d+)\.\s+/);
       if (numMatch && await adapter.exists(targetPath)) {
         const numPrefix = numMatch[1];
