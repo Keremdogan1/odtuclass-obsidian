@@ -1744,6 +1744,10 @@ ${fmText}
       weekNum = 2;
     } else if (/formal\s+definitions.*differentiation/i.test(fullText)) {
       weekNum = 3;
+    } else if (/derivatives\s+ii/i.test(fullText)) {
+      weekNum = 4;
+    } else if (/transcendental\s+functions/i.test(fullText)) {
+      weekNum = 5;
     } else {
       const chMatch = fullText.match(/\bch(?:apter|\.)?\s*0?([1-9]\d*)\b/i);
       if (chMatch) {
