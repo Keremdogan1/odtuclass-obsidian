@@ -1022,6 +1022,95 @@ var ODTUClassPlugin = class extends import_obsidian2.Plugin {
         }
       })
     );
+    this.app.workspace.onLayoutReady(async () => {
+      await this.ensureEssentialPluginsEnabled();
+      this.setupAutoGitSync();
+    });
+  }
+  async ensureEssentialPluginsEnabled() {
+    const pluginsManager = this.app.plugins;
+    if (!pluginsManager || !pluginsManager.manifests)
+      return;
+    const ESSENTIAL_PLUGINS = [
+      "obsidian-git",
+      "odtuclass-obsidian",
+      "freedraw-pdf",
+      "mobile-link-opener",
+      "project-manager",
+      "full-calendar-remastered",
+      "obsidian-excalidraw-plugin",
+      "templater-obsidian"
+    ];
+    let reenabledCount = 0;
+    for (const pluginId of ESSENTIAL_PLUGINS) {
+      if (pluginsManager.manifests[pluginId]) {
+        const isEnabled = pluginsManager.enabledPlugins instanceof Set ? pluginsManager.enabledPlugins.has(pluginId) : Array.isArray(pluginsManager.enabledPlugins) ? pluginsManager.enabledPlugins.includes(pluginId) : false;
+        if (!isEnabled) {
+          console.log(`[ODTUClass Watchdog] Re-enabling essential plugin: ${pluginId}`);
+          try {
+            if (typeof pluginsManager.enablePluginAndSave === "function") {
+              await pluginsManager.enablePluginAndSave(pluginId);
+            } else if (typeof pluginsManager.enablePlugin === "function") {
+              await pluginsManager.enablePlugin(pluginId);
+            }
+            reenabledCount++;
+          } catch (e) {
+            console.warn(`[ODTUClass Watchdog] Failed to enable ${pluginId}:`, e);
+          }
+        }
+      }
+    }
+    if (reenabledCount > 0) {
+      new import_obsidian2.Notice(`[ODTUClass Watchdog] ${reenabledCount} temel eklenti otomatik olarak aktif tutuldu.`);
+    }
+  }
+  setupAutoGitSync() {
+    setTimeout(async () => {
+      var _a;
+      try {
+        const cmds = (_a = this.app.commands) == null ? void 0 : _a.commands;
+        if (cmds && cmds["obsidian-git:pull"]) {
+          console.log("[Git Guardian] Auto-pull on app launch...");
+          await this.app.commands.executeCommandById("obsidian-git:pull");
+        }
+      } catch (err) {
+        console.warn("[Git Guardian] Auto-pull error:", err);
+      }
+    }, 3e3);
+    let lastPushTime = 0;
+    const handleVisibilityChange = async () => {
+      var _a;
+      const cmds = (_a = this.app.commands) == null ? void 0 : _a.commands;
+      if (!cmds)
+        return;
+      if (document.visibilityState === "hidden") {
+        const now = Date.now();
+        if (now - lastPushTime < 3e4)
+          return;
+        lastPushTime = now;
+        try {
+          if (cmds["obsidian-git:push"]) {
+            console.log("[Git Guardian] App backgrounded, committing and syncing...");
+            await this.app.commands.executeCommandById("obsidian-git:push");
+          }
+        } catch (err) {
+          console.warn("[Git Guardian] Auto-push on background error:", err);
+        }
+      } else if (document.visibilityState === "visible") {
+        try {
+          if (cmds["obsidian-git:pull"]) {
+            console.log("[Git Guardian] App resumed, auto-pulling...");
+            await this.app.commands.executeCommandById("obsidian-git:pull");
+          }
+        } catch (err) {
+          console.warn("[Git Guardian] Auto-pull on resume error:", err);
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    this.register(() => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    });
   }
   async ensureDefaultTemplates(overwrite = false) {
     const folderPath = (this.settings.templateFolder || "ODTUClass/Templates").replace(/\/+$/, "");

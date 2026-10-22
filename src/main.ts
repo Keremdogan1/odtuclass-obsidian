@@ -109,6 +109,108 @@ export default class ODTUClassPlugin extends Plugin {
 				}
 			})
 		);
+
+		this.app.workspace.onLayoutReady(async () => {
+			await this.ensureEssentialPluginsEnabled();
+			this.setupAutoGitSync();
+		});
+	}
+
+	async ensureEssentialPluginsEnabled(): Promise<void> {
+		const pluginsManager = (this.app as any).plugins;
+		if (!pluginsManager || !pluginsManager.manifests) return;
+
+		const ESSENTIAL_PLUGINS = [
+			'obsidian-git',
+			'odtuclass-obsidian',
+			'freedraw-pdf',
+			'mobile-link-opener',
+			'project-manager',
+			'full-calendar-remastered',
+			'obsidian-excalidraw-plugin',
+			'templater-obsidian'
+		];
+
+		let reenabledCount = 0;
+		for (const pluginId of ESSENTIAL_PLUGINS) {
+			if (pluginsManager.manifests[pluginId]) {
+				const isEnabled = pluginsManager.enabledPlugins instanceof Set
+					? pluginsManager.enabledPlugins.has(pluginId)
+					: Array.isArray(pluginsManager.enabledPlugins)
+						? pluginsManager.enabledPlugins.includes(pluginId)
+						: false;
+
+				if (!isEnabled) {
+					console.log(`[ODTUClass Watchdog] Re-enabling essential plugin: ${pluginId}`);
+					try {
+						if (typeof pluginsManager.enablePluginAndSave === 'function') {
+							await pluginsManager.enablePluginAndSave(pluginId);
+						} else if (typeof pluginsManager.enablePlugin === 'function') {
+							await pluginsManager.enablePlugin(pluginId);
+						}
+						reenabledCount++;
+					} catch (e) {
+						console.warn(`[ODTUClass Watchdog] Failed to enable ${pluginId}:`, e);
+					}
+				}
+			}
+		}
+
+		if (reenabledCount > 0) {
+			new Notice(`[ODTUClass Watchdog] ${reenabledCount} temel eklenti otomatik olarak aktif tutuldu.`);
+		}
+	}
+
+	setupAutoGitSync(): void {
+		// 1. Initial Pull on layout ready
+		setTimeout(async () => {
+			try {
+				const cmds = (this.app as any).commands?.commands;
+				if (cmds && cmds['obsidian-git:pull']) {
+					console.log('[Git Guardian] Auto-pull on app launch...');
+					await (this.app as any).commands.executeCommandById('obsidian-git:pull');
+				}
+			} catch (err) {
+				console.warn('[Git Guardian] Auto-pull error:', err);
+			}
+		}, 3000);
+
+		// 2. Visibility change handling for mobile & desktop (Push when leaving app, Pull when returning)
+		let lastPushTime = 0;
+		const handleVisibilityChange = async () => {
+			const cmds = (this.app as any).commands?.commands;
+			if (!cmds) return;
+
+			if (document.visibilityState === 'hidden') {
+				// Throttle so rapid app switching doesn't spam pushes (at least 30s between pushes)
+				const now = Date.now();
+				if (now - lastPushTime < 30000) return;
+				lastPushTime = now;
+
+				try {
+					if (cmds['obsidian-git:push']) {
+						console.log('[Git Guardian] App backgrounded, committing and syncing...');
+						await (this.app as any).commands.executeCommandById('obsidian-git:push');
+					}
+				} catch (err) {
+					console.warn('[Git Guardian] Auto-push on background error:', err);
+				}
+			} else if (document.visibilityState === 'visible') {
+				try {
+					if (cmds['obsidian-git:pull']) {
+						console.log('[Git Guardian] App resumed, auto-pulling...');
+						await (this.app as any).commands.executeCommandById('obsidian-git:pull');
+					}
+				} catch (err) {
+					console.warn('[Git Guardian] Auto-pull on resume error:', err);
+				}
+			}
+		};
+
+		document.addEventListener('visibilitychange', handleVisibilityChange);
+		this.register(() => {
+			document.removeEventListener('visibilitychange', handleVisibilityChange);
+		});
 	}
 
 	async ensureDefaultTemplates(overwrite: boolean = false): Promise<number> {
